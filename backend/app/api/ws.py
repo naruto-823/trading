@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-PUSH_INTERVAL_SECONDS = 3
+PUSH_INTERVAL_SECONDS = 1  # 盘前/盘后交易波动快，1秒更新
 MAX_SYMBOLS_PER_CONNECTION = 50
 
 

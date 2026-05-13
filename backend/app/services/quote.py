@@ -42,7 +42,7 @@ def _et_now(now_utc: datetime | None = None) -> datetime:
     return now_utc + timedelta(hours=offset_hours)
 
 def _us_session(now_utc: datetime | None = None) -> str:
-    """返回美股当前所处时段：pre / regular / post / closed"""
+    """返回美股当前所处时段：pre / regular / post / overnight / closed"""
     et = _et_now(now_utc)
     # 周末直接视为收盘
     if et.weekday() >= 5:
@@ -54,6 +54,8 @@ def _us_session(now_utc: datetime | None = None) -> str:
         return "regular"
     if time(16, 0) <= t < time(20, 0):
         return "post"
+    if time(20, 0) <= t <= time(23, 59):
+        return "overnight"
     return "closed"
 
 def _is_us_symbol(symbol: str) -> bool:
@@ -145,7 +147,29 @@ def get_realtime_quotes(symbols: list[str]) -> list[QuoteResponse]:
     quotes = ctx.quote(symbols)
     now_utc = datetime.now(timezone.utc)
 
-    return [_build_quote_response(q, now_utc) for q in quotes]
+    responses = [_build_quote_response(q, now_utc) for q in quotes]
+
+    # 补充：夜盘/收盘时段用 Nasdaq 更新美股价格
+    us_symbols = [s for s in symbols if _is_us_symbol(s)]
+    session = _us_session(now_utc)
+    if us_symbols and session in ("overnight", "closed"):
+        from app.services.yahoo_quote import fetch_yahoo_quotes, pick_latest_price
+        nasdaq_quotes = fetch_yahoo_quotes(us_symbols, with_extended=False)
+
+        for resp in responses:
+            if resp.symbol in nasdaq_quotes:
+                nq = nasdaq_quotes[resp.symbol]
+                latest_price, price_session = pick_latest_price(nq)
+                if latest_price > 0 and price_session == "post":
+                    resp.post_market_price = latest_price
+                    resp.current_price = latest_price
+                    if resp.prev_close > 0:
+                        resp.post_market_change = round(latest_price - resp.prev_close, 4)
+                        resp.post_market_change_ratio = round((latest_price - resp.prev_close) / resp.prev_close * 100, 4)
+                        resp.change = resp.post_market_change
+                        resp.change_ratio = resp.post_market_change_ratio
+
+    return responses
 
 def _get_mock_quotes(symbols: list[str]) -> list[QuoteResponse]:
     from app.longbridge.mock_data import MOCK_QUOTES

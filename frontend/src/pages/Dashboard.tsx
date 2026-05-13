@@ -104,9 +104,7 @@ export default function Dashboard() {
       const livePrice = quote?.current_price && quote.current_price > 0
         ? quote.current_price
         : pos.current_price;
-      const prevClose = quote?.prev_close && quote.prev_close > 0
-        ? quote.prev_close
-        : pos.prev_close ?? 0;
+      const prevClose = pos.prev_close ?? 0;
       const dayPnl = prevClose > 0 ? (livePrice - prevClose) * pos.quantity : pos.day_pnl;
       return sum + dayPnl * USD_TO_HKD_FALLBACK;
     }, 0);
@@ -292,6 +290,7 @@ type PositionRow = {
   quantity: number;
   cost_price: number;
   current_price: number;
+  prev_close: number;
   market_value: number;
   unrealized_pnl: number;
   unrealized_pnl_ratio: number;
@@ -343,6 +342,7 @@ function PositionTable({
                 <th className="pb-3 font-medium text-right">数量</th>
                 <th className="pb-3 font-medium text-right">成本价</th>
                 <th className="pb-3 font-medium text-right">现价</th>
+                <th className="pb-3 font-medium text-right">收盘价</th>
                 <th className="pb-3 font-medium text-right">市值</th>
                 <th className="pb-3 font-medium text-right">浮动盈亏</th>
                 <th className="pb-3 font-medium text-right">盈亏比例</th>
@@ -366,11 +366,15 @@ function PositionTable({
                 const livePnlRatio = quote && pos.cost_price
                   ? (livePrice - pos.cost_price) / pos.cost_price
                   : pos.unrealized_pnl_ratio;
-                const liveDayPnl = quote && quote.prev_close
-                  ? (livePrice - quote.prev_close) * pos.quantity
+                // 收盘价：始终使用 DB 快照值（上一交易日 16:00 收盘价）
+                const prevClose = pos.prev_close || 0;
+                // 当日盈亏：用实时价 - DB 收盘价计算（不用 WebSocket 的 prev_close，
+                // 因为它可能是盘后价而非正式收盘价）
+                const liveDayPnl = quote && prevClose > 0
+                  ? (livePrice - prevClose) * pos.quantity
                   : pos.day_pnl;
-                const liveDayPnlRatio = quote && quote.prev_close
-                  ? (livePrice - quote.prev_close) / quote.prev_close
+                const liveDayPnlRatio = quote && prevClose > 0
+                  ? (livePrice - prevClose) / prevClose
                   : pos.day_pnl_ratio;
 
                 return (
@@ -380,7 +384,10 @@ function PositionTable({
                     <td className="py-3 text-right">{pos.quantity}</td>
                     <td className="py-3 text-right">{pos.cost_price.toFixed(2)}</td>
                     <td className="py-3 text-right">
-                      <PriceCell price={livePrice} quote={quote} />
+                      <PriceCell price={livePrice} quote={quote} prevClose={prevClose} />
+                    </td>
+                    <td className="py-3 text-right text-muted-foreground">
+                      {prevClose > 0 ? prevClose.toFixed(2) : '-'}
                     </td>
                     <td className="py-3 text-right">
                       {formatCurrency(liveMktValue, pos.currency)}
@@ -413,7 +420,7 @@ const SESSION_BADGE: Record<string, { label: string; cls: string }> = {
   post: { label: "盘后", cls: "bg-sky-100 text-sky-700" },
 };
 
-function PriceCell({ price, quote }: { price: number; quote?: QuoteData }) {
+function PriceCell({ price, quote, prevClose }: { price: number; quote?: QuoteData; prevClose: number }) {
   if (!quote) {
     return <span>{price.toFixed(2)}</span>;
   }
@@ -421,12 +428,14 @@ function PriceCell({ price, quote }: { price: number; quote?: QuoteData }) {
   const session = quote.trading_session;
   const badge = SESSION_BADGE[session];
 
-  // 副标题：盘前/盘后时显示对应的涨跌
+  // 副标题：盘前/盘后时显示对应的涨跌（用正确的收盘价重新计算）
   let subline: { value: number; ratio: number } | null = null;
-  if (session === "pre" && quote.pre_market_price > 0) {
-    subline = { value: quote.pre_market_change, ratio: quote.pre_market_change_ratio };
-  } else if (session === "post" && quote.post_market_price > 0) {
-    subline = { value: quote.post_market_change, ratio: quote.post_market_change_ratio };
+  if (session === "pre" && quote.pre_market_price > 0 && prevClose > 0) {
+    const change = quote.pre_market_price - prevClose;
+    subline = { value: change, ratio: (change / prevClose) * 100 };
+  } else if (session === "post" && quote.post_market_price > 0 && prevClose > 0) {
+    const change = quote.post_market_price - prevClose;
+    subline = { value: change, ratio: (change / prevClose) * 100 };
   }
 
   return (

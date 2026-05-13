@@ -268,6 +268,26 @@ def sync_positions(db: Session) -> SyncLog:
 
             now_utc = datetime.utcnow()
 
+            # 期权当日盈亏需要知道"今天是否新开仓/加仓"，
+            # 因为长桥返回的 prev_close 是合约自身昨日收盘价，
+            # 而用户昨天可能根本没持有这个合约（合约一直在市场上但用户今天才买）。
+            # 通过查询 Execution 表的今日成交记录，得到每只期权今日的净成交量（带方向）。
+            # 净成交量的方向规则：买入 (Buy/B) 为正，卖出 (Sell/S) 为负。
+            from sqlalchemy import func as _sql_func
+            today_start_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            option_today_filled_qty: dict[str, int] = {}
+            if option_symbols:
+                today_executions = (
+                    db.query(Execution.symbol, Execution.side, Execution.quantity)
+                    .filter(Execution.symbol.in_(option_symbols))
+                    .filter(Execution.trade_done_at >= today_start_utc)
+                    .all()
+                )
+                for sym, side, qty_filled in today_executions:
+                    side_upper = (side or "").upper()
+                    signed_qty = qty_filled if side_upper.startswith("B") else -qty_filled
+                    option_today_filled_qty[sym] = option_today_filled_qty.get(sym, 0) + signed_qty
+
             if stock_symbols:
                 try:
                     from app.services.quote import _us_session  # 复用美股 session 判断
@@ -281,12 +301,24 @@ def sync_positions(db: Session) -> SyncLog:
                         is_today = _is_quote_from_today(q, now_utc)
 
                         current_price = regular_last_done
-                        # 当日盈亏基准始终是 prev_close（上一个交易日收盘价）
-                        day_pnl_base = prev_close_val
+                        is_us = sym.rsplit(".", 1)[-1].upper() == "US"
+
+                        # 当日盈亏基准
+                        is_us = sym.rsplit(".", 1)[-1].upper() == "US"
+                        if is_us:
+                            # 美股：根据时段选择正确的16:00收盘价作为基准
+                            if us_session == "pre":
+                                day_pnl_base = regular_last_done  # 盘前：last_done是昨天16:00收盘
+                            elif us_session == "regular":
+                                day_pnl_base = prev_close_val  # 盘中：prev_close是昨天16:00收盘
+                            else:  # post, overnight
+                                day_pnl_base = regular_last_done  # 盘后/夜盘：last_done是今天16:00收盘
+                        else:
+                            # 港股等：用 prev_close
+                            day_pnl_base = prev_close_val
 
                         # 美股按时段选当前价：盘前 → pre / 盘中 → last_done / 盘后 → post
                         # 用时段判断而非 "字段存在 + 值 > 0"，避免命中残留数据
-                        is_us = sym.rsplit(".", 1)[-1].upper() == "US"
                         if is_us:
                             pre_q = getattr(q, "pre_market_quote", None)
                             post_q = getattr(q, "post_market_quote", None)
@@ -309,8 +341,20 @@ def sync_positions(db: Session) -> SyncLog:
                         symbol_prices[sym] = current_price
                         symbol_prev_close[sym] = day_pnl_base
                         symbol_is_trading_today[sym] = is_today
+
+                    # 补充：夜盘/收盘时段用 Nasdaq 更新美股价格
+                    us_stocks = [s for s in stock_symbols if s.rsplit(".", 1)[-1].upper() == "US"]
+                    if us_stocks and us_session in ("overnight", "closed"):
+                        from app.services.yahoo_quote import fetch_yahoo_quotes, pick_latest_price
+                        nasdaq_data = fetch_yahoo_quotes(us_stocks, with_extended=False)
+                        for sym, nq in nasdaq_data.items():
+                            latest, sess = pick_latest_price(nq)
+                            if latest > 0 and sess == "post":
+                                symbol_prices[sym] = latest
+                                symbol_is_trading_today[sym] = True
                 except Exception as exc:
                     logger.warning("Failed to fetch stock quotes: %s", exc)
+
 
             # 获取期权报价（失败时重置连接重试一次）
             if option_symbols:
@@ -367,15 +411,62 @@ def sync_positions(db: Session) -> SyncLog:
                             mkt_val = 0.0
                             pnl = -cost_val
                     pnl_ratio = pnl / cost_val if cost_val else 0.0
-                    # 期权当日盈亏（仅当今日有交易时计算）
-                    is_today = symbol_is_trading_today.get(symbol_raw, False)
-                    if is_today and current and prev_close:
+
+                    # 期权当日盈亏精确计算（核心难点：长桥返回的 prev_close 是合约自身
+                    # 昨日收盘价，而用户昨天可能根本没持有这个合约，直接用 prev_close
+                    # 推导当日盈亏会严重失真）。
+                    #
+                    # 判断策略（按优先级）：
+                    #   1. 今日净成交量 == 当前持仓量 → 今天全新开仓 → 当日盈亏 = 持仓盈亏
+                    #   2. 今日净成交量 == 0 + 成本与 prev_close 差异巨大（>30%）
+                    #      → 长桥 history_executions 拉不到今日成交（接口窗口限制），
+                    #        但成本和昨收差异如此之大说明用户不是按 prev_close 接的货，
+                    #        实际上是今天才开的仓 → 当日盈亏 = 持仓盈亏
+                    #   3. 今日净成交量 == 0 + 成本接近 prev_close → 昨天就持有 → 用 prev_close 推导
+                    #   4. 混合情况：今日加/减仓但底仓是昨天的 → 拆分计算
+                    today_signed = option_today_filled_qty.get(symbol_raw, 0)
+                    cost_prev_diverge = (
+                        prev_close > 0 and cost > 0
+                        and abs(cost - prev_close) / prev_close > 0.3
+                    )
+
+                    if current and qty != 0 and today_signed == qty:
+                        # 情况 1：今日全新开/翻仓
+                        day_pnl_val = pnl
+                        day_pnl_ratio_val = pnl_ratio
+                    elif current and qty != 0 and today_signed == 0 and cost_prev_diverge:
+                        # 情况 2：今日成交数据缺失 + 成本与昨收差异巨大 → 视为今日新开仓
+                        day_pnl_val = pnl
+                        day_pnl_ratio_val = pnl_ratio
+                    elif current and prev_close and today_signed == 0:
+                        # 情况 3：今日没成交 + 成本贴近昨收 → 昨天就持有
                         if qty < 0:
                             day_pnl_val = (prev_close - current) * abs(qty) * multiplier
                         else:
                             day_pnl_val = (current - prev_close) * abs(qty) * multiplier
                         prev_val = abs(qty) * prev_close * multiplier
                         day_pnl_ratio_val = day_pnl_val / prev_val if prev_val else 0.0
+                    elif current and qty != 0:
+                        # 情况 4：今日加/减仓但底仓是昨天的，拆分计算。
+                        # 只有当昨日底仓与今日新增方向一致时拆分才有意义；
+                        # 方向相反时退化为持仓盈亏（避免负数干扰）。
+                        yesterday_qty = qty - today_signed
+                        same_direction = (yesterday_qty * qty) > 0 and (today_signed * qty) > 0
+                        if same_direction and prev_close:
+                            if qty < 0:
+                                yesterday_pnl = (prev_close - current) * abs(yesterday_qty) * multiplier
+                                today_pnl = (cost - current) * abs(today_signed) * multiplier
+                            else:
+                                yesterday_pnl = (current - prev_close) * abs(yesterday_qty) * multiplier
+                                today_pnl = (current - cost) * abs(today_signed) * multiplier
+                            day_pnl_val = yesterday_pnl + today_pnl
+                            base_val = (
+                                abs(yesterday_qty) * prev_close + abs(today_signed) * cost
+                            ) * multiplier
+                            day_pnl_ratio_val = day_pnl_val / base_val if base_val else 0.0
+                        else:
+                            day_pnl_val = pnl
+                            day_pnl_ratio_val = pnl_ratio
                     else:
                         day_pnl_val = 0.0
                         day_pnl_ratio_val = 0.0
@@ -384,9 +475,13 @@ def sync_positions(db: Session) -> SyncLog:
                     cost_val = abs(qty) * cost if cost else 0.0
                     pnl = mkt_val - cost_val if current else 0.0
                     pnl_ratio = pnl / cost_val if cost_val else 0.0
-                    # 正股当日盈亏（仅当今日有交易时计算）
-                    is_today = symbol_is_trading_today.get(symbol_raw, False)
-                    if is_today and current and prev_close:
+                    # 正股当日盈亏：美股在盘前/盘中/盘后/夜盘都计算，基准是 prev_close
+                    is_us = symbol_raw.rsplit(".", 1)[-1].upper() == "US"
+                    should_calc_day_pnl = (
+                        is_us and us_session in ("pre", "regular", "post", "overnight")
+                    ) or symbol_is_trading_today.get(symbol_raw, False)
+
+                    if should_calc_day_pnl and current and prev_close:
                         day_pnl_val = (current - prev_close) * qty
                         prev_val = abs(qty) * prev_close
                         day_pnl_ratio_val = day_pnl_val / prev_val if prev_val else 0.0

@@ -10,6 +10,7 @@ from app.services.account import get_latest_account
 from app.services.executions import list_executions
 from app.services.orders import list_orders
 from app.services.pnl import get_pnl_summary
+from app.services.portfolio_analysis import analyze_portfolio
 from app.services.positions import list_positions
 from app.services.quote import get_realtime_quotes
 
@@ -93,6 +94,22 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["symbols"],
+        },
+    },
+    {
+        "name": "analyze_portfolio",
+        "description": (
+            "对当前持仓进行多维度客观分析（仅做事实统计，不构成任何投资建议）。"
+            "包含：summary（市值/货币/市场分布）、concentration（前 N 大持仓集中度）、"
+            "pnl_distribution（盈亏分布、单标的最大盈/亏、当日涨跌幅前列）、"
+            "cost_structure（成本占比 vs 市值占比 漂移）、derivatives（期权多空敞口）、"
+            "alerts（达到阈值的客观风险提示）。"
+            "适用于用户询问 '分析我的仓位'、'仓位体检'、'集中度怎么样'、'今天哪些标的涨/跌得多' 等场景。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
     {
@@ -184,6 +201,10 @@ def execute_tool(tool_name: str, tool_input: dict, db: Session) -> str:
                 return json.dumps({"error": "symbols 不能为空"}, ensure_ascii=False)
             quotes = get_realtime_quotes(symbols)
             return json.dumps([q.model_dump() for q in quotes], ensure_ascii=False, default=str)
+
+        elif tool_name == "analyze_portfolio":
+            result = analyze_portfolio(db)
+            return json.dumps(result, ensure_ascii=False, default=str)
 
         elif tool_name == "sync_now":
             kind = tool_input.get("kind", "all")
