@@ -45,11 +45,13 @@ async def run_macro_flash_job() -> None:
 
 
 def register(sched: AsyncIOScheduler) -> None:
+    """1 min 轮询。MCP 无限免费，频次提到 1min 几乎零成本，
+    平均延迟降到 30s（MCP 没有 push 订阅能力，必须轮询）。"""
     sched.add_job(
         run_macro_flash_job,
-        trigger=IntervalTrigger(minutes=3, timezone="UTC"),
+        trigger=IntervalTrigger(minutes=1, timezone="UTC"),
         id=JOB_ID,
-        name="宏观快讯快通道（3min，源标重要 + 关键词命中直推）",
+        name="宏观快讯快通道（1min，源标重要 + 关键词命中直推）",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
