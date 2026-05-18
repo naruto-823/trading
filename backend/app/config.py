@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     bark_base_url: str = "https://api.day.app"
 
     # 新闻源 fallback 链：Finnhub → Tavily → Brave → Google News RSS
-    # 没配 key 的源自动跳过，至少 Google News RSS 永远可用
+    # 没配 key 的 tier 自动跳过；Google News RSS 永远可用兜底
     finnhub_api_key: str = ""
     tavily_api_key: str = ""
     brave_api_key: str = ""
