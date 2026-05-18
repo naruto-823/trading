@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from app.services.macro_feed import available_macro_sources
 from app.services.news_sources import available_sources
 from app.workers.scheduler import list_jobs, trigger_job_now
 
@@ -23,5 +24,11 @@ async def post_run_job(job_id: str):
 
 @router.get("/system/news-sources")
 def get_news_sources():
-    """查看新闻源 fallback 链：哪些已配置、按 tier 排序"""
-    return {"data": available_sources(), "error": None}
+    """查看新闻源：per-stock fallback 链 + 中文宏观流"""
+    return {
+        "data": {
+            "per_stock": available_sources(),
+            "macro_zh": available_macro_sources(),
+        },
+        "error": None,
+    }
