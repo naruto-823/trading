@@ -366,6 +366,31 @@ export async function deleteDecision(id: string) {
   });
 }
 
+// ===== 后台 jobs（APScheduler）=====
+
+export interface JobStatus {
+  id: string;
+  name: string;
+  next_run_at: string | null;
+  trigger: string;
+  last_run_at: string | null;
+  last_status: "never" | "success" | "error";
+  last_error: string | null;
+  last_duration_ms: number | null;
+  run_count: number;
+}
+
+export async function listJobs() {
+  return request<JobStatus[]>("/system/jobs");
+}
+
+export async function runJob(jobId: string) {
+  return request<{ job_id: string; triggered: boolean }>(
+    `/system/jobs/${jobId}/run`,
+    { method: "POST" },
+  );
+}
+
 export async function getSyncLogs(limit = 20) {
   return request<
     Array<{

@@ -12,6 +12,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import MarketStatus from "@/components/MarketStatus";
 import BriefingCard from "@/components/BriefingCard";
+import SchedulerStatus from "@/components/SchedulerStatus";
 import { useQuoteWebSocket } from "@/hooks/useQuoteWebSocket";
 import { formatCurrency, formatPercent, pnlColor } from "@/lib/utils";
 import { evaluatePosition } from "@/lib/positionRules";
@@ -189,6 +190,9 @@ export default function Dashboard() {
           {syncMutation.isPending ? "同步中..." : "同步数据"}
         </Button>
       </div>
+
+      {/* 后台调度状态：折叠 */}
+      <SchedulerStatus />
 
       {/* AI 复盘卡片：顶部，可折叠 */}
       <BriefingCard />

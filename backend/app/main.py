@@ -15,7 +15,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         print("⚠️  长桥 API 凭证未配置，请编辑 .env 文件（参考 .env.example）")
     if not settings.validate_anthropic():
         print("⚠️  Anthropic API Key 未配置，AI 对话功能不可用")
-    yield
+
+    # 起后台调度器（broker 同步 + briefing/suggestions 自动刷新）
+    from app.workers.scheduler import shutdown_scheduler, start_scheduler
+
+    start_scheduler()
+    try:
+        yield
+    finally:
+        shutdown_scheduler()
 
 
 app = FastAPI(title="AI Trading", version="0.1.0", lifespan=lifespan)
@@ -29,7 +37,7 @@ app.add_middleware(
 )
 
 # 注册路由
-from app.api import account, briefing, chat, decisions, health, quotes, suggestions, sync, trades, ws  # noqa: E402
+from app.api import account, briefing, chat, decisions, health, quotes, suggestions, sync, system, trades, ws  # noqa: E402
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(account.router, prefix="/api", tags=["account"])
@@ -41,3 +49,4 @@ app.include_router(ws.router, prefix="/api", tags=["ws"])
 app.include_router(briefing.router, prefix="/api", tags=["briefing"])
 app.include_router(suggestions.router, prefix="/api", tags=["suggestions"])
 app.include_router(decisions.router, prefix="/api", tags=["decisions"])
+app.include_router(system.router, prefix="/api", tags=["system"])
