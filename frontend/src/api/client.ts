@@ -465,6 +465,26 @@ export async function testNotify() {
   );
 }
 
+// ===== 市场事件（event-watcher 推送过的）=====
+
+export type EventImportance = "high" | "medium";
+
+export interface EventNotificationApi {
+  id: string;
+  notified_at_ms: number;
+  symbol: string | null;
+  importance: EventImportance;
+  title: string;
+  body: string;
+  source_title: string;
+  push_status: "sent" | "failed";
+  push_error: string | null;
+}
+
+export async function listEvents(days = 7) {
+  return request<EventNotificationApi[]>(`/events?days=${days}`);
+}
+
 export async function getSyncLogs(limit = 20) {
   return request<
     Array<{

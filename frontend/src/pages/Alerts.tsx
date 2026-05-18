@@ -1,16 +1,18 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, BellOff, Plus, Trash2, RefreshCw, Send, AlertCircle, CheckCircle2 } from "lucide-react";
+import { Bell, BellOff, Plus, Trash2, RefreshCw, Send, AlertCircle, CheckCircle2, Newspaper, ChevronDown, ChevronUp } from "lucide-react";
 import {
   createAlert,
   deleteAlert,
   getNotifyStatus,
   listAlerts,
+  listEvents,
   testNotify,
   updateAlert,
   type AlertApi,
   type AlertCondition,
   type AlertCreatePayload,
+  type EventNotificationApi,
 } from "@/api/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -133,6 +135,9 @@ export default function Alerts() {
       </Card>
 
       {showForm && <AlertForm onSubmit={(p) => createMutation.mutate(p)} onCancel={() => setShowForm(false)} />}
+
+      {/* 已推送的市场事件历史 */}
+      <EventsSection />
 
       {/* 规则列表 */}
       <Card>
@@ -316,6 +321,97 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
     <div>
       <label className="block text-xs text-muted-foreground mb-1">{label}</label>
       {children}
+    </div>
+  );
+}
+
+// ===== 市场事件历史 =====
+
+function EventsSection() {
+  const [open, setOpen] = useState(true);
+  const query = useQuery({
+    queryKey: ["events", 7],
+    queryFn: () => listEvents(7),
+    staleTime: 60_000,
+    refetchInterval: 5 * 60_000,
+  });
+
+  const events = query.data?.data ?? [];
+  const highCount = events.filter((e) => e.importance === "high").length;
+
+  return (
+    <Card>
+      <CardHeader
+        className="cursor-pointer select-none pb-3"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <CardTitle className="text-base flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <Newspaper className="h-4 w-4 text-blue-600" />
+            重大事件监控
+            <span className="text-xs font-normal text-muted-foreground">
+              event-watcher 每 30min 跑 · 近 7 天 {events.length} 条
+              {highCount > 0 && <span className="text-red-600 ml-1">（{highCount} 条 high）</span>}
+            </span>
+          </span>
+          {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </CardTitle>
+      </CardHeader>
+      {open && (
+        <CardContent>
+          {query.isLoading && <p className="text-sm text-muted-foreground">加载中…</p>}
+          {!query.isLoading && events.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              近 7 天暂无重大事件 —— 多数时段没有，是正常的。LLM 严格筛选，避免噪声打扰。
+            </p>
+          )}
+          <div className="space-y-2">
+            {events.map((e) => (
+              <EventRow key={e.id} event={e} />
+            ))}
+          </div>
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
+function EventRow({ event }: { event: EventNotificationApi }) {
+  const isHigh = event.importance === "high";
+  const ts = new Date(event.notified_at_ms);
+  return (
+    <div
+      className={`rounded-md border p-3 ${
+        isHigh ? "border-red-500/40 bg-red-50/30 dark:bg-red-950/10" : ""
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+              isHigh
+                ? "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400"
+                : "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-500"
+            }`}
+          >
+            {isHigh ? "🔴 high" : "🟡 medium"}
+          </span>
+          {event.symbol && <span className="font-mono text-sm font-semibold">{event.symbol}</span>}
+          <span className="font-medium text-sm">{event.title}</span>
+        </div>
+        <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+          {ts.toLocaleString("zh-CN")}
+        </span>
+      </div>
+      <p className="text-xs text-foreground/90 whitespace-pre-wrap">{event.body}</p>
+      {event.source_title && (
+        <p className="text-[10px] text-muted-foreground italic mt-1.5">
+          ⤷ 来源：{event.source_title}
+        </p>
+      )}
+      {event.push_status === "failed" && (
+        <p className="text-[10px] text-red-600 mt-1">⚠ 推送失败：{event.push_error}</p>
+      )}
     </div>
   );
 }

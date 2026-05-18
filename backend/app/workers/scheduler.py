@@ -68,12 +68,14 @@ def start_scheduler() -> None:
 
     # 延迟 import 避免循环依赖（job 模块依赖 db / services）
     from app.workers.broker_sync_worker import register as register_broker_sync
+    from app.workers.event_watcher_worker import register as register_event_watcher
     from app.workers.market_watcher_worker import register as register_market_watcher
     from app.workers.refresh_worker import register as register_refresh
 
     register_broker_sync(sched)
     register_refresh(sched)
     register_market_watcher(sched)
+    register_event_watcher(sched)
 
     sched.start()
     logger.info("Scheduler started with %d jobs: %s",
