@@ -44,6 +44,13 @@ class Settings(BaseSettings):
     # 真亚秒级，~150MB 内存代价。和 MCP 1min 轮询并存（共用 event_notification 去重）
     jin10_browser_realtime: bool = False
 
+    # Quick Assess 相关性评分：LLM 判断快讯对用户持仓真实影响，过门槛才推
+    # 阈值 0-100；score<阈值的不推（但仍落库，可在 dashboard 看）；0=禁用 scorer 全推
+    # Haiku 4.5 单次 ~$0.001，每天 200-500 次 ≈ $0.3-0.5/day
+    # （fox 需要带完整日期后缀，不是简写）
+    relevance_threshold: int = 50
+    relevance_model: str = "claude-haiku-4-5-20251001"
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 

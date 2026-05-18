@@ -17,9 +17,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.event_notification import EventNotification
 from app.services.macro_feed import MacroFlash, fetch_macro_news
 from app.services.notify import send_bark
+from app.services.relevance_scorer import score_relevance
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +79,11 @@ def _format_push(item: MacroFlash) -> tuple[str, str]:
 
 
 def run_macro_flash(db: Session) -> dict[str, int]:
-    """跑一次：拉 macro_feed → 过滤 → 去重 → 推 → 入库"""
-    stats = {"fetched": 0, "filtered": 0, "fired": 0, "deduped": 0, "failed": 0}
+    """跑一次：拉 macro_feed → 关键词过滤 → 去重 → Quick Assess → 阈值过 → 推 + 入库"""
+    stats = {
+        "fetched": 0, "filtered": 0, "deduped": 0,
+        "scored_low": 0, "fired": 0, "failed": 0,
+    }
 
     items = fetch_macro_news(min_importance=MIN_IMPORTANCE_FOR_PUSH, hours_back=2, limit_per_source=20)
     stats["fetched"] = len(items)
@@ -93,10 +98,37 @@ def run_macro_flash(db: Session) -> dict[str, int]:
             stats["deduped"] += 1
             continue
 
+        # Quick Assess：LLM 评估对用户持仓的真实相关性
+        score_text = item.content or item.title
+        relevance = score_relevance(score_text)
+        score = relevance["score"]
+
+        if score < settings.relevance_threshold:
+            # 低分：不推 Bark，但仍落库（dashboard 可看，可事后调阈值/关键词）
+            rec = EventNotification(
+                id=uuid.uuid4().hex,
+                event_hash=h,
+                notified_at=datetime.utcnow(),
+                symbol=None,
+                importance="medium",
+                title=item.title[:200],
+                body=(item.content or item.title)[:400],
+                source_title=f"[{item.source}] {item.title}"[:500],
+                push_status="skipped_low_relevance",
+                push_error=None,
+                relevance=relevance["relevance"],
+                relevance_score=score,
+                relevance_reason=relevance["reason"],
+            )
+            db.add(rec)
+            db.commit()
+            stats["scored_low"] += 1
+            logger.info("macro-flash skipped [score=%d %s]: %s",
+                        score, relevance["relevance"], item.title[:60])
+            continue
+
+        # 高分：推 Bark
         title, body = _format_push(item)
-        # macro 直推用 active level（非 timeSensitive，避免半夜睡觉响）
-        # 真正紧急的事件 event-watcher LLM 会用 timeSensitive 复推（hash 一致会去重，所以不会）
-        # 改成跟 importance 挂钩
         level = "timeSensitive" if item.importance >= 5 else "active"
         result = send_bark(title, body, level=level, group="market-events", sound="chime")
 
@@ -104,20 +136,24 @@ def run_macro_flash(db: Session) -> dict[str, int]:
             id=uuid.uuid4().hex,
             event_hash=h,
             notified_at=datetime.utcnow(),
-            symbol=None,  # macro
+            symbol=None,
             importance="high" if item.importance >= 5 else "medium",
             title=item.title[:200],
             body=body,
             source_title=f"[{item.source}] {item.title}"[:500],
             push_status="sent" if result["ok"] else "failed",
             push_error=None if result["ok"] else str(result["detail"])[:500],
+            relevance=relevance["relevance"],
+            relevance_score=score,
+            relevance_reason=relevance["reason"],
         )
         db.add(rec)
         db.commit()
 
         if result["ok"]:
             stats["fired"] += 1
-            logger.info("macro-flash fired [%s imp=%d]: %s", item.source, item.importance, item.title[:80])
+            logger.info("macro-flash fired [score=%d %s imp=%d]: %s",
+                        score, item.source, item.importance, item.title[:60])
         else:
             stats["failed"] += 1
 

@@ -6,7 +6,7 @@ event-watcher worker 每 30 min 跑：抓重仓股近期新闻 → LLM 识别重
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String, Text
+from sqlalchemy import DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -33,8 +33,15 @@ class EventNotification(Base):
     source_title: Mapped[str] = mapped_column(Text, default="")
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    push_status: Mapped[str] = mapped_column(String(20), default="sent")  # sent / failed
+    push_status: Mapped[str] = mapped_column(String(40), default="sent")
+    # sent / failed / skipped_low_relevance（Quick Assess 评分不达阈值，不推 Bark）
     push_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Quick Assess 评分：LLM 判断对用户持仓的相关性
+    # relevance: "direct" | "indirect" | "noise" | null（未评分）
+    relevance: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    relevance_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    relevance_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # 复合索引：常按 symbol + 时间倒序查

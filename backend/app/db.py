@@ -59,6 +59,10 @@ def _apply_lightweight_migrations() -> None:
         ("account_snapshot", "cash_infos_json", "TEXT"),
         ("account_snapshot", "outstanding_debt", "FLOAT NOT NULL DEFAULT 0.0"),
         ("account_snapshot", "fx_rates_json", "TEXT"),
+        # Quick Assess 评分（macro_pusher / jin10_browser 推送前的相关性门控）
+        ("event_notification", "relevance", "VARCHAR(20)"),
+        ("event_notification", "relevance_score", "INTEGER"),
+        ("event_notification", "relevance_reason", "TEXT"),
     ]
     for table, column, ddl in added:
         if table not in insp.get_table_names():
