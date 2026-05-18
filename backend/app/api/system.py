@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from app.services.news_sources import available_sources
 from app.workers.scheduler import list_jobs, trigger_job_now
 
 router = APIRouter()
@@ -18,3 +19,9 @@ async def post_run_job(job_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail=f"job {job_id} not found")
     return {"data": {"job_id": job_id, "triggered": True}, "error": None}
+
+
+@router.get("/system/news-sources")
+def get_news_sources():
+    """查看新闻源 fallback 链：哪些已配置、按 tier 排序"""
+    return {"data": available_sources(), "error": None}

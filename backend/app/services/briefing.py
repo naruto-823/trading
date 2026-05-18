@@ -112,70 +112,29 @@ def select_heavy_positions(db: Session) -> list[dict]:
     return heavy
 
 
-def _build_news_query(symbol: str, name: str | None) -> tuple[str, str]:
-    """根据 symbol 构造 Google News 搜索 query + 语言 region。
-    - US 股票：用 ticker + 'stock' 英文搜
-    - HK 股票：优先用中文名（中文新闻更对口），fallback ticker
-    """
-    if symbol.endswith(".US"):
-        ticker = symbol[:-3]
-        return f"{ticker} stock", "en-US"
-    if symbol.endswith(".HK"):
-        if name and any("一" <= ch <= "鿿" for ch in name):
-            return name, "zh-Hant"
-        return f"{symbol[:-3]}.HK", "zh-Hant"
-    return name or symbol, "en-US"
-
-
 def fetch_news_for_symbol(
     symbol: str,
-    client: httpx.Client,
+    client: httpx.Client | None = None,  # 兼容旧 signature，新实现不再依赖外部 client
     name: str | None = None,
     limit: int = NEWS_PER_STOCK,
 ) -> list[dict]:
-    """Google News RSS 抓最近新闻。返回按发布时间倒序的前 N 条。失败返回空列表。"""
-    query, hl = _build_news_query(symbol, name)
-    gl = "US" if hl.startswith("en") else "HK"
-    ceid = f"{gl}:{hl.split('-')[0]}"
+    """走 news_sources 的 fallback 链：Finnhub → Tavily → Brave → Google News RSS。
+    返回结构跟之前一致（dict 列表），保持调用方零改动。
+    """
+    from app.services.news_sources import fetch_news
 
-    try:
-        resp = client.get(
-            GOOGLE_NEWS_RSS,
-            params={"q": query, "hl": hl, "gl": gl, "ceid": ceid},
-        )
-        resp.raise_for_status()
-        root = ET.fromstring(resp.text)
-
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=NEWS_MAX_AGE_HOURS)
-        items: list[dict] = []
-        for it in root.findall(".//item"):
-            title_el = it.find("title")
-            link_el = it.find("link")
-            pub_el = it.find("pubDate")
-            src_el = it.find("source")
-            if title_el is None or link_el is None:
-                continue
-            pub_dt = None
-            if pub_el is not None and pub_el.text:
-                try:
-                    pub_dt = parsedate_to_datetime(pub_el.text)
-                except Exception:
-                    pub_dt = None
-            if pub_dt and pub_dt < cutoff:
-                continue
-            items.append({
-                "title": title_el.text or "",
-                "publisher": (src_el.text if src_el is not None else "") or "",
-                "link": link_el.text or "",
-                "published_at": pub_dt.isoformat() if pub_dt else None,
-                "summary": "",
-            })
-            if len(items) >= limit:
-                break
-        return items
-    except Exception as exc:
-        logger.warning("Google News fetch failed for %s: %s", symbol, exc)
-        return []
+    items = fetch_news(symbol, name=name, limit=limit)
+    return [
+        {
+            "title": it.title,
+            "publisher": it.publisher,
+            "link": it.url,
+            "published_at": it.published_at.isoformat() if it.published_at else None,
+            "summary": it.summary,
+            "source_tier": it.source_tier,
+        }
+        for it in items
+    ]
 
 
 def _fetch_stooq_one(client: httpx.Client, stooq_sym: str) -> tuple[float | None, float | None]:

@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     bark_device_key: str = ""
     bark_base_url: str = "https://api.day.app"
 
+    # 新闻源 fallback 链：Finnhub → Tavily → Brave → Google News RSS
+    # 没配 key 的源自动跳过，至少 Google News RSS 永远可用
+    finnhub_api_key: str = ""
+    tavily_api_key: str = ""
+    brave_api_key: str = ""
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 
