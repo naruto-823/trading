@@ -42,7 +42,11 @@ def _et_now(now_utc: datetime | None = None) -> datetime:
     return now_utc + timedelta(hours=offset_hours)
 
 def _us_session(now_utc: datetime | None = None) -> str:
-    """返回美股当前所处时段：pre / regular / post / overnight / closed"""
+    """返回美股当前所处时段：pre / regular / post / overnight / closed
+
+    夜盘（overnight）跨越午夜：ET 20:00 当晚 → 次日 04:00 盘前开始前。
+    实际上美股一周内的"非交易"时间只剩周末，工作日整 24h 都在某个时段里。
+    """
     et = _et_now(now_utc)
     # 周末直接视为收盘
     if et.weekday() >= 5:
@@ -54,7 +58,8 @@ def _us_session(now_utc: datetime | None = None) -> str:
         return "regular"
     if time(16, 0) <= t < time(20, 0):
         return "post"
-    if time(20, 0) <= t <= time(23, 59):
+    # ET 20:00 ~ 23:59 当晚，以及 00:00 ~ 04:00 次日凌晨，都属于同一段 overnight
+    if t >= time(20, 0) or t < time(4, 0):
         return "overnight"
     return "closed"
 
@@ -106,8 +111,9 @@ def _build_quote_response(quote, now_utc: datetime) -> QuoteResponse:
         elif session == "regular" and last_done > 0:
             current_price = last_done
         else:
-            # closed 时段：优先看是否还有最新的盘后/盘前残留价格作为参考，否则用 last_done
-            current_price = last_done or post_price or pre_price
+            # overnight / closed：post_price 是最近一次延伸时段成交，比 regular 收盘
+            # 更接近"现价"；下方还有 Nasdaq fallback 在 HK 上午 ≈ 美股 post 时段实时刷新。
+            current_price = post_price or last_done or pre_price
     else:
         session = "regular"  # 非美股不细分
         current_price = last_done
@@ -149,7 +155,9 @@ def get_realtime_quotes(symbols: list[str]) -> list[QuoteResponse]:
 
     responses = [_build_quote_response(q, now_utc) for q in quotes]
 
-    # 补充：夜盘/收盘时段用 Nasdaq 更新美股价格
+    # 夜盘/休市时段：用 Nasdaq 兜底刷新 post-market 价。Longbridge 的 post_market_quote
+    # 在 ET 20:00 之后会冻结（账户没开通真夜盘订阅），而 HK 上午（≈ 美股 post 16:00-20:00 ET）
+    # Nasdaq 的 secondary 段是 live 的，能持续推送 post-market 实时成交。
     us_symbols = [s for s in symbols if _is_us_symbol(s)]
     session = _us_session(now_utc)
     if us_symbols and session in ("overnight", "closed"):

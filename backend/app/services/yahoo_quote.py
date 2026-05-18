@@ -81,26 +81,35 @@ def _safe_float(val) -> float:
         return 0.0
 
 
-def _fetch_nasdaq_info(client: httpx.Client, symbol: str) -> dict | None:
-    """获取常规盘最新价 + 上一交易日收盘价"""
-    try:
-        resp = client.get(
-            NASDAQ_INFO_URL.format(symbol=symbol),
-            params={"assetclass": "stocks"},
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        logger.warning("Nasdaq info failed for %s: %s", symbol, exc)
-        return None
+def _fetch_nasdaq_info(client: httpx.Client, symbol: str) -> tuple[dict | None, str]:
+    """获取常规盘最新价 + 上一交易日收盘价。
+
+    Nasdaq /info 接口的 assetclass 必须正确（stocks vs etf vs index），不匹配时
+    返回 200 但 data 为 null/空。优先按 stocks 试一次，data 为空再回退 etf。
+    返回 (info_dict, asset_class_used) 供后续 /extended-trading 复用同一类。
+    """
+    for asset in ("stocks", "etf"):
+        try:
+            resp = client.get(
+                NASDAQ_INFO_URL.format(symbol=symbol),
+                params={"assetclass": asset},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            d = (data.get("data") or {})
+            if d.get("symbol"):  # 该 asset class 匹配
+                return data, asset
+        except Exception as exc:
+            logger.warning("Nasdaq info failed for %s (%s): %s", symbol, asset, exc)
+    return None, "stocks"
 
 
-def _fetch_nasdaq_extended(client: httpx.Client, symbol: str, market_type: str) -> float:
+def _fetch_nasdaq_extended(client: httpx.Client, symbol: str, market_type: str, asset: str = "stocks") -> float:
     """获取扩展时段（pre / post）的最新价"""
     try:
         resp = client.get(
             NASDAQ_EXT_URL.format(symbol=symbol),
-            params={"assetclass": "stocks", "markettype": market_type},
+            params={"assetclass": asset, "markettype": market_type},
         )
         resp.raise_for_status()
         data = resp.json()
@@ -138,7 +147,7 @@ def fetch_yahoo_quote(symbol: str, client: httpx.Client | None = None, with_exte
         client = httpx.Client(timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
 
     try:
-        info = _fetch_nasdaq_info(client, nasdaq_symbol)
+        info, asset_used = _fetch_nasdaq_info(client, nasdaq_symbol)
         if not info:
             return None
 
@@ -156,8 +165,8 @@ def fetch_yahoo_quote(symbol: str, client: httpx.Client | None = None, with_exte
         ext_post = 0.0
         ext_pre = 0.0
         if with_extended:
-            ext_post = _fetch_nasdaq_extended(client, nasdaq_symbol, "post")
-            ext_pre = _fetch_nasdaq_extended(client, nasdaq_symbol, "pre")
+            ext_post = _fetch_nasdaq_extended(client, nasdaq_symbol, "post", asset_used)
+            ext_pre = _fetch_nasdaq_extended(client, nasdaq_symbol, "pre", asset_used)
 
         return {
             "symbol": symbol,

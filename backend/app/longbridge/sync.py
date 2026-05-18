@@ -17,36 +17,51 @@ from app.models.sync_log import SyncLog
 
 logger = logging.getLogger(__name__)
 
-_cached_usd_hkd_rate: float | None = None
+_cached_fx_rates: dict[str, float] | None = None
 
-def _get_usd_hkd_rate() -> float:
-    """获取 USD/HKD 实时汇率，带缓存（每次 sync_all 调用时重置）"""
-    global _cached_usd_hkd_rate
-    if _cached_usd_hkd_rate is not None:
-        return _cached_usd_hkd_rate
+def _get_fx_rates() -> dict[str, float]:
+    """获取多币种汇率（USD-base），带缓存。
+    返回 {"USD_HKD": 7.83, "USD_CNY": 7.24, "HKD_CNY": 0.92, ...}"""
+    global _cached_fx_rates
+    if _cached_fx_rates is not None:
+        return _cached_fx_rates
 
-    # 尝试从公开 API 获取实时汇率
-    fallback_rate = 7.8315
+    fallback = {"USD_HKD": 7.8315, "USD_CNY": 7.24, "HKD_CNY": 0.92, "CNY_HKD": 1.08}
     try:
         url = "https://open.er-api.com/v6/latest/USD"
         req = urllib.request.Request(url, headers={"User-Agent": "trading-app/1.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode())
             if data.get("result") == "success" and "rates" in data:
-                rate = float(data["rates"].get("HKD", fallback_rate))
-                logger.info("USD/HKD rate from API: %.4f", rate)
-                _cached_usd_hkd_rate = rate
-                return rate
+                rates = data["rates"]
+                usd_hkd = float(rates.get("HKD", fallback["USD_HKD"]))
+                usd_cny = float(rates.get("CNY", fallback["USD_CNY"]))
+                result = {
+                    "USD_HKD": usd_hkd,
+                    "USD_CNY": usd_cny,
+                    "HKD_CNY": usd_cny / usd_hkd if usd_hkd else fallback["HKD_CNY"],
+                    "CNY_HKD": usd_hkd / usd_cny if usd_cny else fallback["CNY_HKD"],
+                }
+                logger.info("FX rates from API: USD/HKD=%.4f USD/CNY=%.4f HKD/CNY=%.4f",
+                            usd_hkd, usd_cny, result["HKD_CNY"])
+                _cached_fx_rates = result
+                return result
     except Exception as exc:
-        logger.warning("Failed to fetch USD/HKD rate: %s, using fallback %.4f", exc, fallback_rate)
+        logger.warning("Failed to fetch FX rates: %s, using fallback %s", exc, fallback)
 
-    _cached_usd_hkd_rate = fallback_rate
-    return fallback_rate
+    _cached_fx_rates = fallback
+    return fallback
+
+
+def _get_usd_hkd_rate() -> float:
+    """向后兼容：取 USD/HKD"""
+    return _get_fx_rates()["USD_HKD"]
+
 
 def _reset_rate_cache() -> None:
     """重置汇率缓存，在每次完整同步时调用"""
-    global _cached_usd_hkd_rate
-    _cached_usd_hkd_rate = None
+    global _cached_fx_rates
+    _cached_fx_rates = None
 
 def _use_mock() -> bool:
     return not settings.validate_longport()
@@ -122,6 +137,62 @@ def _is_quote_from_today(quote, now_utc: datetime) -> bool:
         return False
 
 
+def _compute_sold_today_day_pnl_by_market(
+    db: Session, usd_to_hkd: float
+) -> tuple[dict[str, float], float]:
+    """今日已平仓股票对"今日盈亏"的贡献，按市场拆分（原币）+ 折合 HKD 总额。
+
+    定义口径：账户的"今日盈亏" = sum(持仓的 prev_close→current 移动)
+                              + sum(今日已平仓股票的 prev_close→成交价 移动)
+    第二项是 Position 表统计不到的：股票卖完后从 Position 消失，
+    它今天从昨收到卖价那段的移动就丢了。
+
+    只处理股票，期权由 sync_positions 的合约级 day_pnl 逻辑覆盖。
+
+    返回：( {"HK": hkd_amount, "US": usd_amount, ...}, total_hkd )
+    """
+    today_start_utc = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_execs = db.query(Execution).filter(Execution.trade_done_at >= today_start_utc).all()
+    stock_sells = [
+        e for e in today_execs
+        if (e.side or "").upper().startswith("S") and not _is_option_symbol(e.symbol)
+    ]
+    if not stock_sells:
+        return {}, 0.0
+
+    # 拉每个标的的 prev_close（昨日收盘）。当前仍持有的标的可直接复用 Position.prev_close。
+    prev_close_map: dict[str, float] = {}
+    held = {p.symbol: float(p.prev_close) for p in db.query(Position).all() if p.prev_close}
+    need_quote = [e.symbol for e in stock_sells if e.symbol not in held]
+    for sym, pc in held.items():
+        prev_close_map[sym] = pc
+
+    if need_quote:
+        try:
+            from app.longbridge.client import get_quote_context
+            quote_ctx = get_quote_context()
+            for q in quote_ctx.quote(list(set(need_quote))):
+                sym = str(q.symbol)
+                if hasattr(q, "prev_close") and q.prev_close is not None:
+                    prev_close_map[sym] = float(q.prev_close)
+        except Exception as exc:
+            logger.warning("quote fetch for sold-today symbols failed: %s", exc)
+
+    by_market: dict[str, float] = {}
+    total_hkd = 0.0
+    for exe in stock_sells:
+        prev_close = prev_close_map.get(exe.symbol, 0.0)
+        if prev_close <= 0:
+            continue
+        contribution_native = (float(exe.price) - prev_close) * float(exe.quantity)
+        by_market[exe.market] = by_market.get(exe.market, 0.0) + contribution_native
+        if (exe.currency or "").upper() == "USD":
+            total_hkd += contribution_native * usd_to_hkd
+        else:
+            total_hkd += contribution_native
+    return by_market, total_hkd
+
+
 def _start_sync_log(db: Session, kind: str) -> SyncLog:
     log = SyncLog(kind=kind, started_at=datetime.utcnow(), status="running")
     db.add(log)
@@ -168,8 +239,9 @@ def sync_account(db: Session) -> SyncLog:
                 total_cash_val = float(balance.total_cash) if hasattr(balance, "total_cash") else 0.0
                 market_value_val = net_assets_val - total_cash_val
 
-                # 获取 USD/HKD 实时汇率
-                usd_to_hkd = _get_usd_hkd_rate()
+                # 获取多币种汇率
+                fx_rates = _get_fx_rates()
+                usd_to_hkd = fx_rates["USD_HKD"]
 
                 # 从持仓表汇总计算总浮动盈亏和当日盈亏（按货币分组，USD 转 HKD）
                 from sqlalchemy import func
@@ -183,16 +255,55 @@ def sync_account(db: Session) -> SyncLog:
                     .all()
                 )
                 total_pnl_val = 0.0
-                day_pnl_val = 0.0
+                unrealized_day_pnl_hkd = 0.0
                 for currency, pnl, day_pnl in currency_pnl:
                     pnl_float = float(pnl or 0)
                     day_pnl_float = float(day_pnl or 0)
                     if currency == "USD":
                         total_pnl_val += pnl_float * usd_to_hkd
-                        day_pnl_val += day_pnl_float * usd_to_hkd
+                        unrealized_day_pnl_hkd += day_pnl_float * usd_to_hkd
                     else:
                         total_pnl_val += pnl_float
-                        day_pnl_val += day_pnl_float
+                        unrealized_day_pnl_hkd += day_pnl_float
+
+                # 今日已平仓股票对当日盈亏的贡献（昨收 → 卖出价）。
+                # Position 表只统计当前仍持有的标的的 prev_close→current 移动，
+                # 今天卖掉的股票从 Position 消失后这段日内移动就丢了，需要在账户层补齐。
+                realized_by_market, realized_day_pnl_hkd = _compute_sold_today_day_pnl_by_market(
+                    db, usd_to_hkd
+                )
+                day_pnl_val = unrealized_day_pnl_hkd + realized_day_pnl_hkd
+
+                # 融资 / 保证金信息（长桥已按实时汇率换算成账户主币种 HKD）
+                def _safe_dec(obj, attr: str) -> float:
+                    v = getattr(obj, attr, None)
+                    if v is None:
+                        return 0.0
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                cash_infos_serialized: list[dict] = []
+                # 真实融资欠款（HKD）= 把所有币种的负 available 折成 HKD
+                # 这才是长桥 app "融资欠款" 字段的口径。
+                outstanding_debt_hkd = 0.0
+                for ci in getattr(balance, "cash_infos", []) or []:
+                    cur = str(getattr(ci, "currency", ""))
+                    available = _safe_dec(ci, "available_cash")
+                    cash_infos_serialized.append({
+                        "currency": cur,
+                        "available": available,
+                        "withdraw": _safe_dec(ci, "withdraw_cash"),
+                        "frozen": _safe_dec(ci, "frozen_cash"),
+                        "settling": _safe_dec(ci, "settling_cash"),
+                    })
+                    if available < 0:
+                        if cur.upper() == "USD":
+                            outstanding_debt_hkd += available * usd_to_hkd
+                        else:
+                            # HKD / 其他币种暂按 1:1 折算
+                            outstanding_debt_hkd += available
 
                 snapshot = AccountSnapshot(
                     synced_at=datetime.utcnow(),
@@ -202,6 +313,18 @@ def sync_account(db: Session) -> SyncLog:
                     market_value=market_value_val,
                     total_pnl=float(total_pnl_val),
                     day_pnl=float(day_pnl_val),
+                    realized_day_pnl=float(realized_day_pnl_hkd),
+                    realized_day_pnl_by_market=json.dumps(realized_by_market, ensure_ascii=False),
+                    max_finance_amount=_safe_dec(balance, "max_finance_amount"),
+                    remaining_finance_amount=_safe_dec(balance, "remaining_finance_amount"),
+                    outstanding_debt=float(outstanding_debt_hkd),
+                    init_margin=_safe_dec(balance, "init_margin"),
+                    maintenance_margin=_safe_dec(balance, "maintenance_margin"),
+                    buy_power=_safe_dec(balance, "buy_power"),
+                    margin_call=int(getattr(balance, "margin_call", 0) or 0),
+                    risk_level=int(getattr(balance, "risk_level", 0) or 0),
+                    cash_infos_json=json.dumps(cash_infos_serialized, ensure_ascii=False),
+                    fx_rates_json=json.dumps(fx_rates, ensure_ascii=False),
                     raw_json=json.dumps(str(balance)),
                 )
             db.add(snapshot)
@@ -303,22 +426,25 @@ def sync_positions(db: Session) -> SyncLog:
                         current_price = regular_last_done
                         is_us = sym.rsplit(".", 1)[-1].upper() == "US"
 
-                        # 当日盈亏基准
+                        # 当日盈亏基准（"上一交易日收盘价"参照）
                         is_us = sym.rsplit(".", 1)[-1].upper() == "US"
                         if is_us:
-                            # 美股：根据时段选择正确的16:00收盘价作为基准
                             if us_session == "pre":
-                                day_pnl_base = regular_last_done  # 盘前：last_done是昨天16:00收盘
+                                # 盘前：last_done = 昨日 regular 收盘
+                                day_pnl_base = regular_last_done
                             elif us_session == "regular":
-                                day_pnl_base = prev_close_val  # 盘中：prev_close是昨天16:00收盘
-                            else:  # post, overnight
-                                day_pnl_base = regular_last_done  # 盘后/夜盘：last_done是今天16:00收盘
+                                # 盘中：prev_close = 昨日 regular 收盘
+                                day_pnl_base = prev_close_val
+                            else:
+                                # post / overnight / closed：last_done = 最近一次 regular 收盘
+                                # 日内盈亏 = 现价（post/overnight 价）− regular 收盘 = 延伸时段移动
+                                day_pnl_base = regular_last_done
                         else:
                             # 港股等：用 prev_close
                             day_pnl_base = prev_close_val
 
-                        # 美股按时段选当前价：盘前 → pre / 盘中 → last_done / 盘后 → post
-                        # 用时段判断而非 "字段存在 + 值 > 0"，避免命中残留数据
+                        # 选当前价：post/overnight/closed 优先取 post-market（更接近现价），
+                        # 后续 Nasdaq fallback 在夜盘时会用 live post-market 再覆盖一次
                         if is_us:
                             pre_q = getattr(q, "pre_market_quote", None)
                             post_q = getattr(q, "post_market_quote", None)
@@ -335,14 +461,17 @@ def sync_positions(db: Session) -> SyncLog:
                                 current_price = regular_last_done
                                 is_today = True
                             else:
-                                # closed：优先用最近的盘后价反映最新行情，否则用 last_done
+                                # overnight / closed：用 post-market 最近一次成交
                                 current_price = post_last or regular_last_done or pre_last
 
                         symbol_prices[sym] = current_price
                         symbol_prev_close[sym] = day_pnl_base
                         symbol_is_trading_today[sym] = is_today
 
-                    # 补充：夜盘/收盘时段用 Nasdaq 更新美股价格
+                    # 夜盘/休市时段用 Nasdaq 兜底刷新美股 post-market 价。Longbridge 的
+                    # post_market_quote 在 ET 20:00 之后会冻结（账户没开通真夜盘订阅），
+                    # 而 HK 上午 ≈ 美股 post 16:00-20:00 ET 期间 Nasdaq 的 secondary 段是
+                    # live 的，能持续推送 post-market 实时成交。
                     us_stocks = [s for s in stock_symbols if s.rsplit(".", 1)[-1].upper() == "US"]
                     if us_stocks and us_session in ("overnight", "closed"):
                         from app.services.yahoo_quote import fetch_yahoo_quotes, pick_latest_price
@@ -412,34 +541,22 @@ def sync_positions(db: Session) -> SyncLog:
                             pnl = -cost_val
                     pnl_ratio = pnl / cost_val if cost_val else 0.0
 
-                    # 期权当日盈亏精确计算（核心难点：长桥返回的 prev_close 是合约自身
-                    # 昨日收盘价，而用户昨天可能根本没持有这个合约，直接用 prev_close
-                    # 推导当日盈亏会严重失真）。
+                    # 期权当日盈亏：依赖今日成交数据（option_today_filled_qty）判断是
+                    # "老仓"还是"今日新开"。sync_executions 现在 merge 了 today_executions()，
+                    # 今日成交不会丢，所以 today_signed 可信。
                     #
                     # 判断策略（按优先级）：
                     #   1. 今日净成交量 == 当前持仓量 → 今天全新开仓 → 当日盈亏 = 持仓盈亏
-                    #   2. 今日净成交量 == 0 + 成本与 prev_close 差异巨大（>30%）
-                    #      → 长桥 history_executions 拉不到今日成交（接口窗口限制），
-                    #        但成本和昨收差异如此之大说明用户不是按 prev_close 接的货，
-                    #        实际上是今天才开的仓 → 当日盈亏 = 持仓盈亏
-                    #   3. 今日净成交量 == 0 + 成本接近 prev_close → 昨天就持有 → 用 prev_close 推导
-                    #   4. 混合情况：今日加/减仓但底仓是昨天的 → 拆分计算
+                    #   2. 今日净成交量 == 0 → 老仓位 → 当日盈亏 = (prev_close → current) 的移动
+                    #   3. 今日净成交量 != 0 且 != 当前持仓量 → 加/减仓 → 拆分计算
                     today_signed = option_today_filled_qty.get(symbol_raw, 0)
-                    cost_prev_diverge = (
-                        prev_close > 0 and cost > 0
-                        and abs(cost - prev_close) / prev_close > 0.3
-                    )
 
                     if current and qty != 0 and today_signed == qty:
                         # 情况 1：今日全新开/翻仓
                         day_pnl_val = pnl
                         day_pnl_ratio_val = pnl_ratio
-                    elif current and qty != 0 and today_signed == 0 and cost_prev_diverge:
-                        # 情况 2：今日成交数据缺失 + 成本与昨收差异巨大 → 视为今日新开仓
-                        day_pnl_val = pnl
-                        day_pnl_ratio_val = pnl_ratio
                     elif current and prev_close and today_signed == 0:
-                        # 情况 3：今日没成交 + 成本贴近昨收 → 昨天就持有
+                        # 情况 2：今日没成交 → 昨天就持有，用 prev_close 推导日内移动
                         if qty < 0:
                             day_pnl_val = (prev_close - current) * abs(qty) * multiplier
                         else:
@@ -477,8 +594,12 @@ def sync_positions(db: Session) -> SyncLog:
                     pnl_ratio = pnl / cost_val if cost_val else 0.0
                     # 正股当日盈亏：美股在盘前/盘中/盘后/夜盘都计算，基准是 prev_close
                     is_us = symbol_raw.rsplit(".", 1)[-1].upper() == "US"
+                    # "closed" 是夜盘 23:59 到次日盘前 04:00 ET 之间的死区，
+                    # 此时 current = 收盘价 / prev_close = 昨日收盘，两者都有效，
+                    # 应当计算当日盈亏。早期只在 pre/regular/post/overnight 计算导致
+                    # 北京时间 12:00-16:00（≈ ET 00:00-04:00）期间美股 day_pnl 全部为 0。
                     should_calc_day_pnl = (
-                        is_us and us_session in ("pre", "regular", "post", "overnight")
+                        is_us and us_session in ("pre", "regular", "post", "overnight", "closed")
                     ) or symbol_is_trading_today.get(symbol_raw, False)
 
                     if should_calc_day_pnl and current and prev_close:
@@ -529,7 +650,24 @@ def sync_executions(db: Session) -> SyncLog:
             ctx = get_trade_context()
             latest = db.query(Execution).order_by(Execution.trade_done_at.desc()).first()
             start_at = latest.trade_done_at if latest else None
-            raw_executions = ctx.history_executions(start_at=start_at)
+            history = list(ctx.history_executions(start_at=start_at))
+            # history_executions 在港股盘中往往拉不到当日成交，需要 today_executions 补齐
+            try:
+                today = list(ctx.today_executions())
+            except Exception as exc:
+                logger.warning("today_executions() failed: %s", exc)
+                today = []
+            seen_ids: set[str] = set()
+            raw_executions = []
+            for e in today + history:
+                if isinstance(e, dict):
+                    eid = e.get("execution_id") or e.get("trade_id", "")
+                else:
+                    eid = str(getattr(e, "trade_id", "") or getattr(e, "execution_id", ""))
+                if not eid or eid in seen_ids:
+                    continue
+                seen_ids.add(eid)
+                raw_executions.append(e)
 
         rows = 0
         for exe in raw_executions:
@@ -608,7 +746,26 @@ def sync_orders(db: Session) -> SyncLog:
         else:
             from app.longbridge.client import get_trade_context
             ctx = get_trade_context()
-            raw_orders = ctx.history_orders()
+            # history_orders() 不包含当日仍 New/Pending 的单，
+            # 且部分券商窗口下当日已成交单也会延迟出现，需要 today_orders() 合并。
+            history = list(ctx.history_orders())
+            try:
+                today = list(ctx.today_orders())
+            except Exception as exc:
+                logger.warning("today_orders() failed, falling back to history only: %s", exc)
+                today = []
+            seen: set[str] = set()
+            raw_orders = []
+            # today_orders 在前：今日最新状态优先；history 里的同 id 走 upsert 分支更新成最新
+            for o in today + history:
+                if isinstance(o, dict):
+                    oid = o.get("order_id", "")
+                else:
+                    oid = str(o.order_id) if hasattr(o, "order_id") else ""
+                if not oid or oid in seen:
+                    continue
+                seen.add(oid)
+                raw_orders.append(o)
 
         rows = 0
         for ord in raw_orders:
@@ -693,10 +850,14 @@ def sync_orders(db: Session) -> SyncLog:
 def sync_all(db: Session) -> list[SyncLog]:
     # 重置汇率缓存，确保每次同步使用最新汇率
     _reset_rate_cache()
-    # 先同步持仓，再同步账户（账户的 total_pnl 从持仓汇总计算）
+    # 依赖顺序：
+    #   orders     —— 独立
+    #   executions —— 依赖 orders（用 order_id 反查 side/currency）
+    #   positions  —— 依赖 executions（期权当日盈亏拆分需要今日成交）
+    #   account    —— 依赖 positions（汇总持仓浮动） + executions（已实现盈亏）
     return [
-        sync_positions(db),
-        sync_account(db),
         sync_orders(db),
         sync_executions(db),
+        sync_positions(db),
+        sync_account(db),
     ]
