@@ -108,24 +108,25 @@ def check_condition(
     return False
 
 
-def format_trigger_message(alert: Alert, current_price: float, prev_close: float) -> str:
-    """构造发送给 Telegram 的告警文案（Markdown）"""
+def format_trigger_message(
+    alert: Alert, current_price: float, prev_close: float
+) -> tuple[str, str]:
+    """构造 Bark 推送的 (title, body)。
+    title 短，锁屏一眼能看清；body 多一些上下文。"""
     pct = (current_price - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
 
-    cond_desc = {
-        "price_above": f"现价突破 *${alert.threshold}*",
-        "price_below": f"现价跌破 *${alert.threshold}*",
-        "day_change_pct_above": f"日内涨幅突破 *+{alert.threshold}%*",
-        "day_change_pct_below": f"日内跌幅突破 *{alert.threshold}%*",
+    cond_short = {
+        "price_above": f"突破 ${alert.threshold}",
+        "price_below": f"跌破 ${alert.threshold}",
+        "day_change_pct_above": f"涨破 +{alert.threshold}%",
+        "day_change_pct_below": f"跌破 {alert.threshold}%",
     }.get(alert.condition, alert.condition)
 
-    note_part = f"\n*备注*: {alert.note}" if alert.note else ""
-
-    return (
-        f"🔔 *{alert.symbol} 触发告警*\n"
-        f"\n"
-        f"*条件*: {cond_desc}\n"
-        f"*现价*: ${current_price:.2f} ({pct:+.2f}%)\n"
-        f"*昨收*: ${prev_close:.2f}"
-        f"{note_part}"
-    )
+    title = f"🔔 {alert.symbol} {cond_short}"
+    body_lines = [
+        f"现价 ${current_price:.2f}（{pct:+.2f}%）",
+        f"昨收 ${prev_close:.2f}",
+    ]
+    if alert.note:
+        body_lines.append(f"备注：{alert.note}")
+    return title, "\n".join(body_lines)

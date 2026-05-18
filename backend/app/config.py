@@ -25,9 +25,10 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     anthropic_model: str = "claude-opus-4-7"
 
-    # Telegram 推送（market-watcher 触发告警时发送）
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
+    # Bark iOS 推送（market-watcher 触发告警时发送）
+    # device_key 在 Bark app 首页可以一键复制；base_url 默认官方公服，自部署填自己的
+    bark_device_key: str = ""
+    bark_base_url: str = "https://api.day.app"
 
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"

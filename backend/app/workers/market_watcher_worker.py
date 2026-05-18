@@ -26,7 +26,7 @@ from app.services.alerts import (
     list_active_alerts,
     mark_triggered,
 )
-from app.services.notify import send_telegram
+from app.services.notify import send_bark
 from app.services.yahoo_quote import fetch_yahoo_quotes
 from app.workers.scheduler import record_duration
 
@@ -60,15 +60,16 @@ def _run_once_sync() -> int:
                 continue
 
             # 命中 → 通知 + 标记
-            msg = format_trigger_message(alert, current_price, prev_close)
-            result = send_telegram(msg)
+            title, body = format_trigger_message(alert, current_price, prev_close)
+            # 跌破/突破阈值这种带方向的告警，用 timeSensitive 突破 iOS 专注模式
+            result = send_bark(title, body, level="timeSensitive")
             if result["ok"]:
                 mark_triggered(db, alert)
                 fired += 1
                 logger.info("alert fired: %s %s @ %.2f", alert.symbol, alert.condition, current_price)
             else:
                 logger.warning(
-                    "alert %s 命中但 Telegram 推送失败：%s",
+                    "alert %s 命中但 Bark 推送失败：%s",
                     alert.symbol, result["detail"],
                 )
         return fired

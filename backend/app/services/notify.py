@@ -1,7 +1,12 @@
-"""Telegram 推送
+"""Bark iOS 推送
 
-只接 Telegram Bot API（最简、零依赖；其他渠道以后再加）。
-配置：env 里 TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID。
+为啥用 Bark：
+- iOS 系统级推送，锁屏可见，不用打开任何 app
+- 国内直连官方公服，不需要科学上网
+- 配置只要 1 个 key
+- 服务端开源可自部署
+
+API: POST {base_url}/push 带 JSON
 """
 
 from __future__ import annotations
@@ -14,37 +19,56 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_API = "https://api.telegram.org"
-
 
 def is_configured() -> bool:
-    return bool(settings.telegram_bot_token and settings.telegram_chat_id)
+    return bool(settings.bark_device_key)
 
 
-def send_telegram(text: str, parse_mode: str = "Markdown") -> dict:
-    """发条消息。返回 {'ok': bool, 'detail': str | dict}.
+def send_bark(
+    title: str,
+    body: str,
+    *,
+    group: str = "trading-alerts",
+    sound: str = "bell",
+    level: str = "active",
+    url: str | None = None,
+) -> dict:
+    """发条 Bark 推送。返回 {'ok': bool, 'detail': str | dict}。
     不抛异常 —— 调用方根据返回值决定怎么处理。
+
+    level:
+    - active（默认）：普通通知，有声有 banner
+    - timeSensitive：突破"专注"模式，给真正紧急的告警
+    - critical：突破静音，慎用
     """
     if not is_configured():
-        return {"ok": False, "detail": "Telegram 未配置（缺 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID）"}
+        return {"ok": False, "detail": "Bark 未配置（缺 BARK_DEVICE_KEY）"}
 
-    url = f"{TELEGRAM_API}/bot{settings.telegram_bot_token}/sendMessage"
-    payload = {
-        "chat_id": settings.telegram_chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
+    push_url = f"{settings.bark_base_url.rstrip('/')}/push"
+    payload: dict = {
+        "device_key": settings.bark_device_key,
+        "title": title,
+        "body": body,
+        "group": group,
+        "sound": sound,
+        "level": level,
     }
+    if url:
+        payload["url"] = url
+
     try:
-        resp = httpx.post(url, json=payload, timeout=10.0)
-        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-        if resp.is_success and data.get("ok"):
+        resp = httpx.post(push_url, json=payload, timeout=8.0)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        # Bark 成功返回 {"code": 200, "message": "success", ...}
+        if resp.is_success and data.get("code") == 200:
             return {"ok": True, "detail": data}
-        # Telegram 返回 200 但 ok=false 是常见情况（如 chat_id 错）
         return {
             "ok": False,
-            "detail": data.get("description") or resp.text or f"HTTP {resp.status_code}",
+            "detail": data.get("message") or resp.text or f"HTTP {resp.status_code}",
         }
     except Exception as exc:
-        logger.exception("Telegram send failed")
+        logger.exception("Bark send failed")
         return {"ok": False, "detail": str(exc)}

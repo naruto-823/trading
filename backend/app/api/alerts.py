@@ -9,7 +9,7 @@ from app.services.alerts import (
     list_alerts,
     update_alert,
 )
-from app.services.notify import is_configured, send_telegram
+from app.services.notify import is_configured, send_bark
 
 router = APIRouter()
 
@@ -48,15 +48,17 @@ def remove_alert(alert_id: str):
 
 @router.get("/alerts/notify/status")
 def notify_status():
-    """前端用：判断 Telegram 是不是配好了"""
+    """前端用：判断 Bark 是不是配好了"""
     return {"data": {"configured": is_configured()}, "error": None}
 
 
 @router.post("/alerts/notify/test")
 def notify_test():
-    """发条测试消息验证 Telegram 配置"""
-    result = send_telegram(
-        "🧪 *AI Trading 测试推送*\n如果你看到这条，说明 Telegram 配置成功。"
+    """发条测试消息验证 Bark 配置"""
+    result = send_bark(
+        title="🧪 AI Trading 测试推送",
+        body="看到这条说明 Bark 配置成功，市场告警就会用同样方式推过来。",
+        level="active",
     )
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=result["detail"])

@@ -84,7 +84,7 @@ export default function Alerts() {
         <div>
           <h2 className="text-2xl font-bold tracking-tight">价格告警</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            条件命中 → Telegram 推送 · market-watcher 每 60s 检查一次
+            条件命中 → Bark iOS 推送 · market-watcher 每 60s 检查一次
           </p>
         </div>
         <Button onClick={() => setShowForm((v) => !v)}>
@@ -100,12 +100,15 @@ export default function Alerts() {
             {notifyConfigured ? (
               <>
                 <CheckCircle2 className="h-4 w-4 text-green-600" />
-                <span>Telegram 已配置</span>
+                <span>Bark 已配置（iOS 推送）</span>
               </>
             ) : (
               <>
                 <AlertCircle className="h-4 w-4 text-amber-600" />
-                <span>Telegram 未配置 —— 在 .env 加 <code className="font-mono">TELEGRAM_BOT_TOKEN</code> 和 <code className="font-mono">TELEGRAM_CHAT_ID</code></span>
+                <span>
+                  Bark 未配置 —— 在 .env 加 <code className="font-mono">BARK_DEVICE_KEY</code>
+                  （在 Bark app 首页复制）
+                </span>
               </>
             )}
           </div>
