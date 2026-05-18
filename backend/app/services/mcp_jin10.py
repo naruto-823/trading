@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -152,3 +153,110 @@ def list_calendar() -> list[dict]:
     except Exception as exc:
         logger.warning("Jin10 MCP list_calendar failed: %s", exc)
         return []
+
+
+# ---------- Session 复用 + 搜索接口 ----------
+
+class _JinSession:
+    """共享 session 给多次 tool 调用，省 init 开销"""
+
+    def __init__(self, client: httpx.Client, session_id: str):
+        self.client = client
+        self.session_id = session_id
+
+    def call(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
+        return _call_tool(self.client, self.session_id, name, arguments)
+
+    def search_flash(self, keyword: str, limit: int = 10) -> list[dict]:
+        data = self.call("search_flash", {"keyword": keyword})
+        items = (data.get("data") or {}).get("items") or []
+        return items[:limit]
+
+    def search_news(self, keyword: str, limit: int = 5) -> list[dict]:
+        data = self.call("search_news", {"keyword": keyword})
+        items = (data.get("data") or {}).get("items") or []
+        return items[:limit]
+
+
+@contextmanager
+def jin10_session():
+    """with jin10_session() as s: s.search_flash(...) — 一轮多次调用共享 session"""
+    if not is_configured():
+        yield None
+        return
+    client = httpx.Client(timeout=DEFAULT_TIMEOUT)
+    try:
+        sid = _open_session(client)
+        yield _JinSession(client, sid)
+    except Exception as exc:
+        logger.warning("Jin10 MCP session failed: %s", exc)
+        yield None
+    finally:
+        client.close()
+
+
+# ---------- 持仓 ticker → 中文搜索关键词映射 ----------
+
+# 把 longbridge symbol 映射到金十常用中文搜索词
+# 没在映射里的：US 股回退到 ticker base（如 NVDA）；HK 股用 longbridge 提供的中文 name
+TICKER_ZH_KEYWORDS: dict[str, str] = {
+    "AAPL.US": "苹果",
+    "MSFT.US": "微软",
+    "GOOG.US": "谷歌",
+    "GOOGL.US": "谷歌",
+    "META.US": "Meta",
+    "TSLA.US": "特斯拉",
+    "NVDA.US": "英伟达",
+    "AMZN.US": "亚马逊",
+    "TSM.US": "台积电",
+    "INTC.US": "英特尔",
+    "AMD.US": "AMD",
+    "BABA.US": "阿里巴巴",
+    "PDD.US": "拼多多",
+    "JD.US": "京东",
+    "MU.US": "美光",
+    "NFLX.US": "奈飞",
+    "ARM.US": "ARM",
+    "AVGO.US": "博通",
+    "ORCL.US": "甲骨文",
+    "CRM.US": "Salesforce",
+    # ETF 不适合中文搜，返回 None 跳过
+    "QQQ.US": "",
+    "SPY.US": "",
+    "VOO.US": "",
+    "IWM.US": "",
+}
+
+
+def get_search_keyword(symbol: str, name: str | None) -> str:
+    """决定金十搜索用什么关键词。返回空串表示不搜（如 ETF）"""
+    if symbol in TICKER_ZH_KEYWORDS:
+        return TICKER_ZH_KEYWORDS[symbol]
+    if symbol.endswith(".HK") and name:
+        # 港股的 name 一般已经是中文（如 "腾讯控股"），取前 2-3 字
+        return name[:4].replace("控股", "").replace("集团", "").strip() or name
+    if symbol.endswith(".US"):
+        return symbol[:-3]  # 兜底 ticker
+    return name or symbol
+
+
+def search_for_position(
+    session: _JinSession,
+    symbol: str,
+    name: str | None,
+    flash_limit: int = 5,
+    news_limit: int = 3,
+) -> dict[str, list[dict]]:
+    """对单只持仓搜金十。返回 {'flash': [...], 'news': [...]}。
+    需要外部传入 session，由调用方管理 with 块。
+    """
+    kw = get_search_keyword(symbol, name)
+    if not kw:
+        return {"flash": [], "news": []}
+    try:
+        flash = session.search_flash(kw, limit=flash_limit)
+        news = session.search_news(kw, limit=news_limit)
+        return {"flash": flash, "news": news}
+    except Exception as exc:
+        logger.warning("Jin10 search for %s (%s) failed: %s", symbol, kw, exc)
+        return {"flash": [], "news": []}
