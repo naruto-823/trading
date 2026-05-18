@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     jin10_mcp_token: str = ""
     jin10_mcp_url: str = "https://mcp.jin10.com/mcp"
 
+    # 金十实时浏览器 worker（Playwright headless chromium 跑 jin10.com，借浏览器解码绕过 WS 加密）
+    # 真亚秒级，~150MB 内存代价。和 MCP 1min 轮询并存（共用 event_notification 去重）
+    jin10_browser_realtime: bool = False
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 

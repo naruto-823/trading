@@ -16,13 +16,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     if not settings.validate_anthropic():
         print("⚠️  Anthropic API Key 未配置，AI 对话功能不可用")
 
-    # 起后台调度器（broker 同步 + briefing/suggestions 自动刷新）
+    # 起后台调度器（scheduler workers）+ Playwright jin10 实时（如启用）
+    from app.workers import jin10_browser_worker
     from app.workers.scheduler import shutdown_scheduler, start_scheduler
 
     start_scheduler()
+    jin10_browser_worker.start()  # settings.jin10_browser_realtime=False 时 no-op
     try:
         yield
     finally:
+        await jin10_browser_worker.stop()
         shutdown_scheduler()
 
 

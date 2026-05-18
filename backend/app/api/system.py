@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.services.macro_feed import available_macro_sources
 from app.services.news_sources import available_sources
+from app.workers import jin10_browser_worker
 from app.workers.scheduler import list_jobs, trigger_job_now
 
 router = APIRouter()
@@ -32,3 +33,9 @@ def get_news_sources():
         },
         "error": None,
     }
+
+
+@router.get("/system/jin10-browser")
+def get_jin10_browser():
+    """金十实时浏览器 worker 状态（Playwright headless chromium）"""
+    return {"data": jin10_browser_worker.status(), "error": None}
