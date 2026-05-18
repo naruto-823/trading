@@ -411,12 +411,14 @@ def sync_positions(db: Session) -> SyncLog:
                     signed_qty = qty_filled if side_upper.startswith("B") else -qty_filled
                     option_today_filled_qty[sym] = option_today_filled_qty.get(sym, 0) + signed_qty
 
+            # us_session 期权段也要用，提到外层算一次（pure function 无副作用）
+            from app.services.quote import _us_session
+            us_session = _us_session(now_utc)
+
             if stock_symbols:
                 try:
-                    from app.services.quote import _us_session  # 复用美股 session 判断
                     quote_ctx = get_quote_context()
                     quotes = quote_ctx.quote(stock_symbols)
-                    us_session = _us_session(now_utc)
                     for q in quotes:
                         sym = str(q.symbol)
                         regular_last_done = float(q.last_done) if hasattr(q, "last_done") else 0.0
@@ -541,17 +543,16 @@ def sync_positions(db: Session) -> SyncLog:
                             pnl = -cost_val
                     pnl_ratio = pnl / cost_val if cost_val else 0.0
 
-                    # 期权当日盈亏：依赖今日成交数据（option_today_filled_qty）判断是
-                    # "老仓"还是"今日新开"。sync_executions 现在 merge 了 today_executions()，
-                    # 今日成交不会丢，所以 today_signed 可信。
-                    #
-                    # 判断策略（按优先级）：
-                    #   1. 今日净成交量 == 当前持仓量 → 今天全新开仓 → 当日盈亏 = 持仓盈亏
-                    #   2. 今日净成交量 == 0 → 老仓位 → 当日盈亏 = (prev_close → current) 的移动
-                    #   3. 今日净成交量 != 0 且 != 当前持仓量 → 加/减仓 → 拆分计算
+                    # 期权当日盈亏：只在美股 regular 时段算，其他时段（pre/post/overnight/closed）
+                    # 期权流动性差、报价噪声大，强算会让两列看着几乎相等且数字飘忽。直接归零更清楚。
                     today_signed = option_today_filled_qty.get(symbol_raw, 0)
+                    is_us_option = market.upper() == "US"
 
-                    if current and qty != 0 and today_signed == qty:
+                    if is_us_option and us_session != "regular":
+                        # 美股期权非正式盘内：当日盈亏直接 0
+                        day_pnl_val = 0.0
+                        day_pnl_ratio_val = 0.0
+                    elif current and qty != 0 and today_signed == qty:
                         # 情况 1：今日全新开/翻仓
                         day_pnl_val = pnl
                         day_pnl_ratio_val = pnl_ratio
