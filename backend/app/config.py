@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     brave_api_key: str = ""
 
+    # 金十 MCP（结构化快讯 + 财经日历），配 token 优先用，否则 fall back JS 解析
+    jin10_mcp_token: str = ""
+    jin10_mcp_url: str = "https://mcp.jin10.com/mcp"
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 

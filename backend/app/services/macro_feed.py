@@ -58,7 +58,56 @@ JIN10_JS_RE = re.compile(r"var\s+newest\s*=\s*(\[.*?\]);?\s*$", re.DOTALL)
 
 
 def fetch_jin10(limit: int = DEFAULT_LIMIT_PER_SOURCE) -> list[MacroFlash]:
-    """金十 flash_newest.js（JS 文件，正则提取 JSON 数组）"""
+    """金十快讯。配了 MCP token 走官方 MCP（结构化、稳定），否则解析公开 JS 文件兜底"""
+    from app.services.mcp_jin10 import is_configured as mcp_ready, list_flash as mcp_list_flash
+
+    if mcp_ready():
+        try:
+            return _fetch_jin10_via_mcp(limit, mcp_list_flash)
+        except Exception as exc:
+            logger.warning("Jin10 MCP failed, fallback to JS parse: %s", exc)
+    return _fetch_jin10_legacy_js(limit)
+
+
+def _fetch_jin10_via_mcp(limit: int, mcp_list_flash) -> list[MacroFlash]:
+    """通过 MCP 拿结构化快讯。MCP 不提供 importance 字段，整体当 imp=2 处理；
+    含特定关键词（重要/紧急/突发/Fed/CPI/FOMC）的提升到 4。
+    """
+    raw = mcp_list_flash(limit=limit * 2)  # 多拉一些，下面再裁
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=MACRO_MAX_AGE_HOURS)
+    important_kw = ("【重要】", "【紧急】", "突发", "fed", "fomc", "cpi", "ppi", "非农", "美联储", "鲍威尔", "央行")
+
+    results: list[MacroFlash] = []
+    for it in raw:
+        # MCP time 是 ISO 8601 (e.g. 2026-05-18T19:32:25+08:00)
+        try:
+            t = datetime.fromisoformat(it["time"]).astimezone(timezone.utc)
+        except Exception:
+            continue
+        if t < cutoff:
+            continue
+        content = (it.get("content") or "").strip()
+        title = (it.get("title") or "").strip() or content[:80]
+        if not content and not title:
+            continue
+        # 启发式 importance：含关键词标 4，否则 2
+        text_lower = (title + " " + content).lower()
+        importance = 4 if any(kw in text_lower for kw in important_kw) else 2
+        results.append(MacroFlash(
+            time=t,
+            title=title,
+            content=content or title,
+            importance=importance,
+            source="jin10",
+            tags=[],
+        ))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _fetch_jin10_legacy_js(limit: int) -> list[MacroFlash]:
+    """金十 flash_newest.js（JS 文件，正则提取 JSON 数组）—— MCP 不可用时兜底"""
     try:
         resp = httpx.get(
             "https://www.jin10.com/flash_newest.js",
@@ -252,8 +301,14 @@ def fetch_macro_news(
 
 def available_macro_sources() -> list[dict]:
     """用于 /api/system/news-sources 显示"""
+    from app.services.mcp_jin10 import is_configured as jin10_mcp_ready
     return [
-        {"name": "jin10", "configured": True, "category": "macro_zh"},
-        {"name": "cailianshe", "configured": True, "category": "macro_zh"},
-        {"name": "wallstcn", "configured": True, "category": "macro_zh"},
+        {
+            "name": "jin10",
+            "configured": True,
+            "category": "macro_zh",
+            "mode": "MCP（结构化）" if jin10_mcp_ready() else "JS 解析（兜底）",
+        },
+        {"name": "cailianshe", "configured": True, "category": "macro_zh", "mode": "公开 API"},
+        {"name": "wallstcn", "configured": True, "category": "macro_zh", "mode": "公开 API"},
     ]
