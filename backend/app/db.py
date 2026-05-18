@@ -63,6 +63,11 @@ def _apply_lightweight_migrations() -> None:
         ("event_notification", "relevance", "VARCHAR(20)"),
         ("event_notification", "relevance_score", "INTEGER"),
         ("event_notification", "relevance_reason", "TEXT"),
+        # 多维度评分扩展
+        ("event_notification", "sentiment", "VARCHAR(20)"),
+        ("event_notification", "direction", "VARCHAR(20)"),
+        ("event_notification", "confidence", "INTEGER"),
+        ("event_notification", "affected_tickers_json", "TEXT"),
     ]
     for table, column, ddl in added:
         if table not in insp.get_table_names():

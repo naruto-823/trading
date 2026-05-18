@@ -37,11 +37,20 @@ class EventNotification(Base):
     # sent / failed / skipped_low_relevance（Quick Assess 评分不达阈值，不推 Bark）
     push_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Quick Assess 评分：LLM 判断对用户持仓的相关性
-    # relevance: "direct" | "indirect" | "noise" | null（未评分）
+    # Quick Assess 多维度评分（LLM 输出）
+    # relevance: "direct" | "indirect" | "noise"
     relevance: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 综合 score 0-100，推送门槛用这个
     relevance_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     relevance_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # sentiment: positive(利好) | negative(利空) | neutral(中性)
+    sentiment: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # direction: bullish(看涨) | bearish(看跌) | neutral
+    direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # confidence: 评分本身的可信度 0-100
+    confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 受影响的重仓 ticker 列表（JSON 数组字符串）
+    affected_tickers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # 复合索引：常按 symbol + 时间倒序查

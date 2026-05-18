@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+_DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
 
 from app.config import settings
 from app.db import SessionLocal
@@ -149,55 +152,69 @@ def _process_flash_sync(flash: dict[str, Any]) -> None:
             _state["deduped"] += 1
             return
 
-        # Quick Assess：LLM 评估相关性，过门槛才推 Bark
-        relevance = score_relevance(content)
-        score = relevance["score"]
+        # Quick Assess：多维度评分
+        scoring = score_relevance(content)
+        score = scoring["score"]
+        affected = scoring["affected_tickers"]
+        affected_json = json.dumps(affected, ensure_ascii=False) if affected else None
+        symbol = affected[0] if affected else None
+
+        common_kwargs = dict(
+            id=uuid.uuid4().hex,
+            event_hash=h,
+            notified_at=datetime.utcnow(),
+            symbol=symbol,
+            source_title=f"[jin10-realtime] {content[:200]}",
+            relevance=scoring["relevance"],
+            relevance_score=score,
+            relevance_reason=scoring["reason"],
+            sentiment=scoring["sentiment"],
+            direction=scoring["direction"],
+            confidence=scoring["confidence"],
+            affected_tickers_json=affected_json,
+        )
 
         if score < settings.relevance_threshold:
-            # 低分：落库 push_status="skipped_low_relevance"，dashboard 可见，不推 Bark
             rec = EventNotification(
-                id=uuid.uuid4().hex,
-                event_hash=h,
-                notified_at=datetime.utcnow(),
-                symbol=None,
+                **common_kwargs,
                 importance="high" if flash.get("is_important") else "medium",
                 title=content[:200],
                 body=content[:500],
-                source_title=f"[jin10-realtime] {content[:200]}",
                 push_status="skipped_low_relevance",
                 push_error=None,
-                relevance=relevance["relevance"],
-                relevance_score=score,
-                relevance_reason=relevance["reason"],
             )
             db.add(rec)
             db.commit()
             _state["scored_low"] += 1
-            logger.info("jin10-browser skipped [score=%d %s]: %s",
-                        score, relevance["relevance"], content[:60])
+            logger.info("jin10-browser skipped [score=%d %s dir=%s]: %s",
+                        score, scoring["relevance"], scoring["direction"], content[:60])
             return
 
+        # 高分：推 Bark，title 加 emoji + ticker
         marker = "⚡" if flash.get("is_important") else "📡"
-        title = f"{marker}[金十实时] {content[:30]}{'…' if len(content) > 30 else ''}"
-        body = content[:500]
-        level = "timeSensitive" if flash.get("is_important") else "active"
+        dir_icon = _DIR_EMOJI.get(scoring["direction"], "")
+        ticker_part = f"{affected[0]} " if affected else ""
+        title = f"{marker}{dir_icon}[金十] {ticker_part}{content[:25]}{'…' if len(content) > 25 else ''}"
 
+        # body 头部加一行 sentiment / direction / confidence 标签（不是 neutral 才加）
+        body_lines = []
+        if scoring["sentiment"] != "neutral" or scoring["direction"] != "neutral":
+            sent = {"positive": "利好", "negative": "利空", "neutral": "中性"}[scoring["sentiment"]]
+            dir_label = {"bullish": "看涨", "bearish": "看跌", "neutral": "中性"}[scoring["direction"]]
+            body_lines.append(f"{sent} · {dir_label} · 可信度 {scoring['confidence']}%")
+        body_lines.append(content)
+        body = "\n".join(body_lines)[:500]
+
+        level = "timeSensitive" if flash.get("is_important") else "active"
         result = send_bark(title, body, level=level, group="market-events", sound="chime")
 
         rec = EventNotification(
-            id=uuid.uuid4().hex,
-            event_hash=h,
-            notified_at=datetime.utcnow(),
-            symbol=None,
+            **common_kwargs,
             importance="high" if flash.get("is_important") else "medium",
             title=content[:200],
             body=body,
-            source_title=f"[jin10-realtime] {content[:200]}",
             push_status="sent" if result["ok"] else "failed",
             push_error=None if result["ok"] else str(result["detail"])[:500],
-            relevance=relevance["relevance"],
-            relevance_score=score,
-            relevance_reason=relevance["reason"],
         )
         db.add(rec)
         db.commit()
@@ -206,9 +223,8 @@ def _process_flash_sync(flash: dict[str, Any]) -> None:
             _state["fired"] += 1
             _state["last_fired_at"] = datetime.utcnow().isoformat() + "Z"
             _state["last_fired_title"] = content[:80]
-            logger.info("jin10-browser fired [score=%d %s]: %s", score,
-                        "important" if flash.get("is_important") else "normal",
-                        content[:80])
+            logger.info("jin10-browser fired [score=%d dir=%s]: %s",
+                        score, scoring["direction"], content[:80])
     finally:
         db.close()
 

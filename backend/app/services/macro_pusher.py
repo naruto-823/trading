@@ -17,11 +17,17 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+import json as _json
+
 from app.config import settings
 from app.models.event_notification import EventNotification
 from app.services.macro_feed import MacroFlash, fetch_macro_news
 from app.services.notify import send_bark
 from app.services.relevance_scorer import score_relevance
+
+
+# direction → emoji（push title 用，让你锁屏一眼看出 bullish/bearish）
+_DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
 
 logger = logging.getLogger(__name__)
 
@@ -98,62 +104,75 @@ def run_macro_flash(db: Session) -> dict[str, int]:
             stats["deduped"] += 1
             continue
 
-        # Quick Assess：LLM 评估对用户持仓的真实相关性
+        # Quick Assess：LLM 多维度评分
         score_text = item.content or item.title
-        relevance = score_relevance(score_text)
-        score = relevance["score"]
+        scoring = score_relevance(score_text)
+        score = scoring["score"]
+        affected = scoring["affected_tickers"]
+        affected_json = _json.dumps(affected, ensure_ascii=False) if affected else None
+        # 受影响 ticker 用第一个；没有则 None
+        symbol = affected[0] if affected else None
+
+        common_kwargs = dict(
+            id=uuid.uuid4().hex,
+            event_hash=h,
+            notified_at=datetime.utcnow(),
+            symbol=symbol,
+            source_title=f"[{item.source}] {item.title}"[:500],
+            relevance=scoring["relevance"],
+            relevance_score=score,
+            relevance_reason=scoring["reason"],
+            sentiment=scoring["sentiment"],
+            direction=scoring["direction"],
+            confidence=scoring["confidence"],
+            affected_tickers_json=affected_json,
+        )
 
         if score < settings.relevance_threshold:
-            # 低分：不推 Bark，但仍落库（dashboard 可看，可事后调阈值/关键词）
+            # 低分：不推 Bark，但仍落库
             rec = EventNotification(
-                id=uuid.uuid4().hex,
-                event_hash=h,
-                notified_at=datetime.utcnow(),
-                symbol=None,
+                **common_kwargs,
                 importance="medium",
                 title=item.title[:200],
                 body=(item.content or item.title)[:400],
-                source_title=f"[{item.source}] {item.title}"[:500],
                 push_status="skipped_low_relevance",
                 push_error=None,
-                relevance=relevance["relevance"],
-                relevance_score=score,
-                relevance_reason=relevance["reason"],
             )
             db.add(rec)
             db.commit()
             stats["scored_low"] += 1
-            logger.info("macro-flash skipped [score=%d %s]: %s",
-                        score, relevance["relevance"], item.title[:60])
+            logger.info("macro-flash skipped [score=%d %s dir=%s]: %s",
+                        score, scoring["relevance"], scoring["direction"], item.title[:60])
             continue
 
-        # 高分：推 Bark
-        title, body = _format_push(item)
+        # 高分：推 Bark，title 带 direction emoji + 受影响 ticker
+        dir_icon = _DIR_EMOJI.get(scoring["direction"], "")
+        ticker_part = f"{affected[0]} " if affected else ""
+        title = f"📡{dir_icon}[{item.source}] {ticker_part}{item.title[:25]}"
+        body_lines = []
+        if scoring["sentiment"] != "neutral":
+            sent_label = "利好" if scoring["sentiment"] == "positive" else "利空"
+            body_lines.append(f"{sent_label} · 看{('涨' if scoring['direction']=='bullish' else '跌' if scoring['direction']=='bearish' else '平')} · 可信度 {scoring['confidence']}%")
+        body_lines.append(item.content if item.content and item.content != item.title else item.title)
+        body = "\n".join(body_lines)[:400]
         level = "timeSensitive" if item.importance >= 5 else "active"
         result = send_bark(title, body, level=level, group="market-events", sound="chime")
 
         rec = EventNotification(
-            id=uuid.uuid4().hex,
-            event_hash=h,
-            notified_at=datetime.utcnow(),
-            symbol=None,
+            **common_kwargs,
             importance="high" if item.importance >= 5 else "medium",
             title=item.title[:200],
             body=body,
-            source_title=f"[{item.source}] {item.title}"[:500],
             push_status="sent" if result["ok"] else "failed",
             push_error=None if result["ok"] else str(result["detail"])[:500],
-            relevance=relevance["relevance"],
-            relevance_score=score,
-            relevance_reason=relevance["reason"],
         )
         db.add(rec)
         db.commit()
 
         if result["ok"]:
             stats["fired"] += 1
-            logger.info("macro-flash fired [score=%d %s imp=%d]: %s",
-                        score, item.source, item.importance, item.title[:60])
+            logger.info("macro-flash fired [score=%d %s dir=%s]: %s",
+                        score, item.source, scoring["direction"], item.title[:60])
         else:
             stats["failed"] += 1
 

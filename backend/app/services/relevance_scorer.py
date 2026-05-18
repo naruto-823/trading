@@ -29,24 +29,58 @@ _positions_cache: tuple[str, float] | None = None
 _POSITIONS_CACHE_TTL = 300
 
 
-SYSTEM_PROMPT = """你是金融快讯的相关性评分员。给一条快讯 + 用户的持仓清单，判断这条新闻对用户**实际影响程度**。
+SYSTEM_PROMPT = """你是金融快讯多维度评分员。给一条快讯 + 用户持仓清单，输出严格 JSON：
 
-输出严格 JSON（不要 markdown 包裹）：
-{"relevance": "direct|indirect|noise", "score": <0-100整数>, "reason": "一句话30字内"}
+{
+  "relevance": "direct|indirect|noise",
+  "score": <0-100整数>,
+  "sentiment": "positive|negative|neutral",
+  "direction": "bullish|bearish|neutral",
+  "confidence": <0-100整数>,
+  "affected_tickers": ["MSFT", "TSLA"],
+  "reason": "30字内"
+}
 
-【评分标准】
-- direct (70-100)：明确点名用户持仓的 ticker / 公司名；或全球宏观重大事件（FOMC决议、CPI/PPI/非农数据、关键地缘升级）
-- indirect (40-70)：同行业 / 供应链 / 竞品 / 相关监管，需 1-2 步推理才能传导到持仓
-- noise (0-40)：A 股个股动态 / 跟持仓行业完全无关 / 国内地方性新闻 / 普通行业政策
+【relevance 相关性】
+- direct：明确点名用户持仓 ticker / 公司名；或全球宏观重大事件（FOMC / CPI / PPI / 非农 / 地缘大升级）
+- indirect：同行业 / 供应链 / 竞品 / 相关监管，需 1-2 步推理传导
+- noise：A 股个股 / 跟持仓行业完全无关 / 国内地方性 / 小公司动态
+
+【sentiment 利好利空】（新闻本身的性质）
+- positive：订单 / 收购 / 业绩超预期 / 监管利好 / 大客户拿下
+- negative：监管 / 诉讼 / 召回 / 业绩 miss / 高管离任 / 事故
+- neutral：人事变动 / 数据公布 / 中性披露
+
+【direction 看涨看跌】（对用户持仓的方向影响 —— 该加仓还是减仓？）
+- bullish：看涨，可加仓 / 持有
+- bearish：看跌，应警惕 / 减仓
+- neutral：影响中性 / 已 priced in / 方向不明
+
+注意 sentiment 和 direction 不一定相同：
+- "美联储意外加息"：sentiment=neutral（数据），direction=bearish（对科技股）
+- "苹果发布新 iPad"：sentiment=positive，direction=neutral（已 priced in）
+
+【confidence 可信度】你对自己评分的把握度
+- 80-100：来自权威源 + 明确事件 + 已发生
+- 50-80：明确事件但传导路径有推理
+- 20-50：传闻 / 猜测 / 间接 / 数据不全
+- < 20：极度不确定
+
+【score 综合分】= 你自己根据上面四维度综合给的 0-100：
+- direct + 高 confidence + 明确 direction = 80-100（推荐用 timeSensitive 推）
+- direct + 中 confidence = 60-80
+- indirect + 高 confidence + 强 direction = 50-70
+- noise / 很低 confidence = 0-40
+- 跟用户重仓直接相关的（affected_tickers 非空）score 至少 +15
+
+【affected_tickers】受影响的用户**持仓** ticker（最多 3 个；无受影响则 []）
 
 【硬规则】
-- 用户持仓基本是美股 mega cap tech（MSFT/META/QQQ/TSLA/GOOG/AAPL/TSM）+ 一两只港股
-- **A 股个股新闻一律 noise**（即使含"芯片"/"AI"等关键词），除非该 A 股本身就是持仓
-- **国内地方政府 / 小公司新闻一律 noise**
-- 美联储 / CPI / PPI / 非农 / 地缘升级 一律 direct
-- reason 必须解释为什么是这个分数
+- 用户重仓基本是美股 mega cap tech + 港股
+- A 股个股新闻 affected_tickers 必为 []，relevance=noise，score < 30（即使含"芯片"/"AI"）
+- 美联储 / CPI / 油价突变 / 地缘升级：relevance=direct，score >= 70
 
-只输出 JSON，不要任何 markdown 包裹。"""
+只输出 JSON 不要 markdown 包裹。"""
 
 
 def _get_positions_context() -> str:
@@ -82,22 +116,39 @@ def invalidate_positions_cache() -> None:
     _positions_cache = None
 
 
+def _fail_open(reason: str) -> dict[str, Any]:
+    """异常情况返回 score=100 的兜底字典，让快讯通过推送（避免漏 signal）"""
+    return {
+        "relevance": "direct", "score": 100,
+        "sentiment": "neutral", "direction": "neutral", "confidence": 50,
+        "affected_tickers": [],
+        "reason": reason, "model": "fail-open",
+    }
+
+
 def score_relevance(content: str) -> dict[str, Any]:
     """评分一条快讯。永远返回字典，永不抛异常（fail-open）。
 
-    返回：
-        {"relevance": "direct|indirect|noise", "score": int, "reason": str, "model": str}
-        fail-open 时 score=100，让它通过推送
+    返回结构：
+        {
+            "relevance": "direct|indirect|noise",
+            "score": int (0-100),
+            "sentiment": "positive|negative|neutral",
+            "direction": "bullish|bearish|neutral",
+            "confidence": int (0-100),
+            "affected_tickers": list[str],
+            "reason": str,
+            "model": str,
+        }
     """
     if not content or len(content.strip()) < 5:
-        return {"relevance": "noise", "score": 0, "reason": "内容太短", "model": "rule"}
+        return {**_fail_open("内容太短"), "score": 0, "relevance": "noise", "model": "rule"}
 
-    # 阈值=0 表示禁用 scorer，全推（保留 score=100 让后续逻辑通过）
     if settings.relevance_threshold <= 0:
-        return {"relevance": "direct", "score": 100, "reason": "scorer 已禁用", "model": "none"}
+        return _fail_open("scorer 已禁用")
 
     if not settings.anthropic_api_key:
-        return {"relevance": "direct", "score": 100, "reason": "AI 未配置 → fail-open", "model": "none"}
+        return _fail_open("AI 未配置")
 
     positions_ctx = _get_positions_context()
     user_prompt = f"{positions_ctx}\n\n快讯内容：{content[:600]}"
@@ -106,16 +157,15 @@ def score_relevance(content: str) -> dict[str, Any]:
         client = Anthropic(
             api_key=settings.anthropic_api_key,
             base_url=settings.anthropic_base_url or None,
-            timeout=5.0,  # 卡死 5s，超时就 fail-open
+            timeout=8.0,  # 多维度判断稍慢一点
         )
         resp = client.messages.create(
             model=settings.relevance_model,
-            max_tokens=200,
+            max_tokens=400,  # 输出更多字段
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
-        # 去掉可能的 markdown 包裹
         if text.startswith("```"):
             first_nl = text.find("\n")
             if first_nl > 0:
@@ -124,22 +174,36 @@ def score_relevance(content: str) -> dict[str, Any]:
                 text = text[:-3]
             text = text.strip()
         data = json.loads(text)
-        score = int(data.get("score", 0))
-        score = max(0, min(100, score))
+
+        # 规范化 + clamp
         relevance = data.get("relevance", "noise")
         if relevance not in ("direct", "indirect", "noise"):
             relevance = "noise"
+        sentiment = data.get("sentiment", "neutral")
+        if sentiment not in ("positive", "negative", "neutral"):
+            sentiment = "neutral"
+        direction = data.get("direction", "neutral")
+        if direction not in ("bullish", "bearish", "neutral"):
+            direction = "neutral"
+
+        score = max(0, min(100, int(data.get("score", 0))))
+        confidence = max(0, min(100, int(data.get("confidence", 50))))
+
+        affected = data.get("affected_tickers") or []
+        if not isinstance(affected, list):
+            affected = []
+        affected = [str(t).upper().strip() for t in affected if t][:3]
+
         return {
             "relevance": relevance,
             "score": score,
+            "sentiment": sentiment,
+            "direction": direction,
+            "confidence": confidence,
+            "affected_tickers": affected,
             "reason": str(data.get("reason", ""))[:200],
             "model": settings.relevance_model,
         }
     except Exception as exc:
         logger.warning("relevance_scorer fail-open: %s", exc)
-        return {
-            "relevance": "direct",
-            "score": 100,
-            "reason": f"scorer 异常 fail-open: {type(exc).__name__}",
-            "model": "fail-open",
-        }
+        return _fail_open(f"scorer 异常: {type(exc).__name__}")
