@@ -251,7 +251,8 @@ export interface SuggestionAffordability {
 }
 
 export interface Suggestion {
-  id: string;
+  id: string;                         // suggestion_key (symbol-action)
+  row_id: string;                     // DB 主键，用于 dismiss API
   action: SuggestionAction;
   symbol: string;
   qty: string;
@@ -260,11 +261,21 @@ export interface Suggestion {
   thesis: string;
   data_points: string[];
   affordability?: SuggestionAffordability;
+  dismissed: boolean;
+  adopted_decision_id: string | null;
 }
 
 export interface SuggestionsData {
   generated_at: string;
   cache_hit: boolean;
+  batch_id: string;
+  summary: string;
+  suggestions: Suggestion[];
+}
+
+export interface SuggestionBatch {
+  batch_id: string;
+  generated_at: string;
   summary: string;
   suggestions: Suggestion[];
 }
@@ -272,6 +283,17 @@ export interface SuggestionsData {
 export async function getSuggestions(forceRefresh = false) {
   const qs = forceRefresh ? "?force_refresh=true" : "";
   return request<SuggestionsData>(`/decisions/suggestions${qs}`);
+}
+
+export async function getSuggestionHistory(days = 7) {
+  return request<SuggestionBatch[]>(`/decisions/suggestions/history?days=${days}`);
+}
+
+export async function dismissSuggestion(rowId: string) {
+  return request<{ row_id: string; dismissed: boolean }>(
+    `/decisions/suggestions/${rowId}/dismiss`,
+    { method: "POST" },
+  );
 }
 
 // ===== 决策日志（后端持久化）=====

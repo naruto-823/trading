@@ -14,6 +14,7 @@ from app.schemas.decision import (
     DecisionResponse,
     DecisionUpdate,
 )
+from app.services.suggestions import mark_suggestion_adopted
 
 
 def list_decisions(db: Session, status: str | None = None) -> list[DecisionResponse]:
@@ -55,6 +56,15 @@ def create_decision(db: Session, payload: DecisionCreate) -> DecisionResponse:
     db.add(decision)
     db.commit()
     db.refresh(decision)
+
+    # 如果是从 AI 建议采纳过来的，反向标记 suggestion 为已采纳（关联到这条 decision）
+    if payload.source == "ai_suggestion" and payload.source_suggestion_id:
+        try:
+            mark_suggestion_adopted(db, payload.source_suggestion_id, decision.id)
+        except Exception:
+            # 标记失败不阻断 decision 创建（容错）
+            pass
+
     return DecisionResponse.model_validate(decision)
 
 

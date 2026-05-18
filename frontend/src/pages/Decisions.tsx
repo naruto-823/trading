@@ -6,12 +6,15 @@ import { Button } from "@/components/ui/button";
 import {
   createDecision,
   deleteDecision,
+  dismissSuggestion,
+  getSuggestionHistory,
   getSuggestions,
   listDecisions,
   updateDecisionStatus,
   type DecisionApi,
   type DecisionCreatePayload,
   type Suggestion,
+  type SuggestionBatch,
 } from "@/api/client";
 
 type Action = "buy" | "sell" | "add" | "stop_loss";
@@ -272,6 +275,7 @@ export default function Decisions() {
       )}
 
       <SuggestionsSection onAdopt={adoptSuggestion} />
+      <SuggestionHistorySection />
 
 
       {/* 冷静期里（按决策自己的 cooldownHours） */}
@@ -736,39 +740,12 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 // ---- AI 建议 ----
 
-const DISMISS_KEY = "suggestions.dismissed.v1";
-const DISMISS_TTL_HOURS = 24;
-
-function loadDismissed(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(DISMISS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    // 清掉过期的
-    const cutoff = Date.now() - DISMISS_TTL_HOURS * 3600 * 1000;
-    return Object.fromEntries(
-      Object.entries(parsed as Record<string, number>).filter(([, ts]) => ts > cutoff),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function saveDismissed(d: Record<string, number>) {
-  localStorage.setItem(DISMISS_KEY, JSON.stringify(d));
-}
-
 const ACTION_LABEL_EN: Record<Action, string> = ACTION_LABEL;
 const URGENCY_ICON: Record<string, string> = { high: "🔴", medium: "🟡", low: "🟢" };
 
 function SuggestionsSection({ onAdopt }: { onAdopt: (s: Suggestion) => void }) {
   const queryClient = useQueryClient();
-  const [dismissed, setDismissed] = useState<Record<string, number>>(() => loadDismissed());
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-
-  useEffect(() => {
-    saveDismissed(dismissed);
-  }, [dismissed]);
 
   const query = useQuery({
     queryKey: ["suggestions"],
@@ -780,16 +757,23 @@ function SuggestionsSection({ onAdopt }: { onAdopt: (s: Suggestion) => void }) {
     mutationFn: () => getSuggestions(true),
     onSuccess: (data) => {
       queryClient.setQueryData(["suggestions"], data);
+      queryClient.invalidateQueries({ queryKey: ["suggestionsHistory"] });
     },
   });
 
-  const dismiss = (id: string) => {
-    setDismissed((prev) => ({ ...prev, [id]: Date.now() }));
-  };
+  // 后端持久化 dismiss：driven by 服务端 dismissed 字段，前端只发请求 + invalidate
+  const dismissMutation = useMutation({
+    mutationFn: (rowId: string) => dismissSuggestion(rowId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["suggestionsHistory"] });
+    },
+  });
 
   const data = query.data?.data;
   const isLoading = query.isLoading || refreshMutation.isPending;
-  const visible = (data?.suggestions ?? []).filter((s) => !dismissed[s.id]);
+  // 后端的 /current 端点已经过滤了 dismissed，前端就直接展示
+  const visible = data?.suggestions ?? [];
 
   return (
     <Card className="border-blue-500/30">
@@ -799,7 +783,7 @@ function SuggestionsSection({ onAdopt }: { onAdopt: (s: Suggestion) => void }) {
           <CardTitle className="text-base">AI 决策建议</CardTitle>
           {data && (
             <span className="text-xs text-muted-foreground ml-1">
-              {data.cache_hit ? "缓存" : "新鲜"} · {visible.length}/{data.suggestions.length} 条
+              {data.cache_hit ? "缓存" : "新鲜"} · {visible.length} 条 · {relativeTime(new Date(data.generated_at).getTime())}
             </span>
           )}
         </div>
@@ -889,9 +873,15 @@ function SuggestionsSection({ onAdopt }: { onAdopt: (s: Suggestion) => void }) {
               )}
 
               <div className="flex items-center justify-end gap-2 pt-1">
-                <Button variant="outline" size="sm" onClick={() => dismiss(s.id)} className="h-7 text-xs">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => dismissMutation.mutate(s.row_id)}
+                  disabled={dismissMutation.isPending}
+                  className="h-7 text-xs"
+                >
                   <XCircle className="h-3 w-3 mr-1" />
-                  驳回（24h 内不再显示）
+                  驳回
                 </Button>
                 <Button size="sm" onClick={() => onAdopt(s)} className="h-7 text-xs">
                   <CheckCircle2 className="h-3 w-3 mr-1" />
@@ -909,6 +899,105 @@ function SuggestionsSection({ onAdopt }: { onAdopt: (s: Suggestion) => void }) {
           </p>
         )}
       </CardContent>
+    </Card>
+  );
+}
+
+// ---- AI 建议历史区 ----
+
+function SuggestionHistorySection() {
+  const [open, setOpen] = useState(false);
+  const query = useQuery({
+    queryKey: ["suggestionsHistory"],
+    queryFn: () => getSuggestionHistory(14),
+    enabled: open,
+    staleTime: 5 * 60 * 1000,
+  });
+  const batches: SuggestionBatch[] = query.data?.data ?? [];
+
+  return (
+    <Card>
+      <CardHeader
+        className="cursor-pointer select-none pb-3"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <CardTitle className="text-base flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            📜 历史 AI 建议
+            {open && (
+              <span className="text-xs font-normal text-muted-foreground ml-1">
+                近 14 天 · {batches.length} 批
+              </span>
+            )}
+          </span>
+          {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </CardTitle>
+      </CardHeader>
+      {open && (
+        <CardContent className="space-y-4">
+          {query.isLoading && <p className="text-sm text-muted-foreground">加载中…</p>}
+          {query.isError && (
+            <p className="text-sm text-red-600">加载失败：{String(query.error)}</p>
+          )}
+          {!query.isLoading && batches.length === 0 && (
+            <p className="text-sm text-muted-foreground">近 14 天暂无 AI 建议历史。</p>
+          )}
+          {batches.map((b) => {
+            const total = b.suggestions.length;
+            const adopted = b.suggestions.filter((s) => s.adopted_decision_id).length;
+            const dismissed = b.suggestions.filter(
+              (s) => s.dismissed && !s.adopted_decision_id,
+            ).length;
+            const pending = total - adopted - dismissed;
+            return (
+              <details key={b.batch_id} className="border rounded-md p-3">
+                <summary className="cursor-pointer flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    {new Date(b.generated_at).toLocaleString("zh-CN")} · {total} 条
+                  </span>
+                  <span className="text-xs space-x-2">
+                    <span className="text-green-600">采纳 {adopted}</span>
+                    <span className="text-muted-foreground">驳回 {dismissed}</span>
+                    <span className="text-amber-600">未处理 {pending}</span>
+                  </span>
+                </summary>
+                {b.summary && (
+                  <p className="text-xs text-muted-foreground mt-2 italic">{b.summary}</p>
+                )}
+                <div className="space-y-2 mt-2">
+                  {b.suggestions.map((s) => {
+                    const statusBadge = s.adopted_decision_id
+                      ? { text: "✓ 采纳", cls: "text-green-700 dark:text-green-500" }
+                      : s.dismissed
+                        ? { text: "✗ 驳回", cls: "text-muted-foreground line-through" }
+                        : { text: "○ 未处理", cls: "text-amber-600" };
+                    return (
+                      <div
+                        key={s.row_id}
+                        className="text-xs flex items-center gap-2 flex-wrap"
+                      >
+                        <span>{URGENCY_ICON[s.urgency] ?? ""}</span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-medium ${ACTION_COLOR[s.action as Action]}`}
+                        >
+                          {ACTION_LABEL_EN[s.action as Action] ?? s.action}
+                        </span>
+                        <span className="font-mono">{s.symbol}</span>
+                        {s.qty && <span className="text-muted-foreground">× {s.qty}</span>}
+                        <span
+                          className={`${statusBadge.cls} text-[11px] font-medium ml-auto`}
+                        >
+                          {statusBadge.text}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </details>
+            );
+          })}
+        </CardContent>
+      )}
     </Card>
   );
 }

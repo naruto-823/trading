@@ -11,14 +11,15 @@ from __future__ import annotations
 import json
 import logging
 import re
-import time
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from anthropic import Anthropic
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.models.suggestion import Suggestion as SuggestionRow
 from app.services.account import get_latest_account
 from app.services.briefing import (
     HTTP_HEADERS,
@@ -30,8 +31,7 @@ from app.services.yahoo_quote import fetch_yahoo_quotes
 
 logger = logging.getLogger(__name__)
 
-_CACHE: dict[str, tuple[dict, float]] = {}
-CACHE_TTL_SECONDS = 30 * 60  # 30 分钟
+CACHE_TTL_SECONDS = 30 * 60  # 30 分钟内的最新批次直接复用，不重新生成
 
 USD_TO_HKD_FALLBACK = 7.83
 
@@ -133,32 +133,31 @@ def _enrich_positions(positions, total_mv_hkd: float) -> list[dict]:
 
 
 def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
-    """生成 AI 决策建议"""
+    """生成 AI 决策建议。
+
+    持久化策略：每次新生成的一批入库（共享 batch_id + generated_at）。
+    30 分钟内的最新批次直接复用，避免重复烧钱。重启后从 DB 恢复，不再丢。
+    """
     positions = list_positions(db)
     account = get_latest_account(db)
 
     if not positions or not account:
         return _empty_response("暂无持仓数据，请先同步")
 
+    # 优先复用 DB 里的最新批次（cache_hit）
+    if not force_refresh:
+        latest_batch = _load_latest_batch(db)
+        if latest_batch is not None:
+            generated_at, rows = latest_batch
+            age = datetime.now(timezone.utc) - _ensure_utc(generated_at)
+            if age < timedelta(seconds=CACHE_TTL_SECONDS):
+                return _batch_to_response(rows, cache_hit=True)
+
     # 计算总市值（HKD）
     total_mv_hkd = sum(
         p.market_value if p.currency == "HKD" else abs(p.market_value) * USD_TO_HKD_FALLBACK
         for p in positions
     )
-
-    cache_key = _cache_key(positions, account)
-    now_ts = time.time()
-
-    if not force_refresh:
-        cached = _CACHE.get(cache_key)
-        if cached:
-            result, ts = cached
-            if now_ts - ts < CACHE_TTL_SECONDS:
-                return {
-                    **result,
-                    "cache_hit": True,
-                    "generated_at": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
-                }
 
     # 抓市场背景 + 重仓股新闻（前 6 大）
     sorted_pos = sorted(positions, key=lambda p: abs(p.market_value), reverse=True)
@@ -192,12 +191,143 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
         held_positions=enriched_positions,
     )
 
-    _CACHE[cache_key] = (result, now_ts)
+    # 持久化这一批
+    batch_id = uuid.uuid4().hex
+    generated_at = datetime.now(timezone.utc)
+    rows = _persist_batch(db, batch_id, generated_at, result.get("summary", ""), result.get("suggestions", []))
+    return _batch_to_response(rows, cache_hit=False)
+
+
+def _load_latest_batch(db: Session) -> tuple[datetime, list[SuggestionRow]] | None:
+    """拿最新一批 suggestions（按 generated_at 倒序找第一批）"""
+    latest = db.query(SuggestionRow).order_by(SuggestionRow.generated_at.desc()).first()
+    if not latest:
+        return None
+    rows = (
+        db.query(SuggestionRow)
+        .filter(SuggestionRow.batch_id == latest.batch_id)
+        .order_by(SuggestionRow.row_id.asc())
+        .all()
+    )
+    return latest.generated_at, rows
+
+
+def _persist_batch(
+    db: Session,
+    batch_id: str,
+    generated_at: datetime,
+    summary: str,
+    suggestions: list[dict],
+) -> list[SuggestionRow]:
+    rows: list[SuggestionRow] = []
+    for s in suggestions:
+        row = SuggestionRow(
+            row_id=uuid.uuid4().hex,
+            batch_id=batch_id,
+            generated_at=generated_at,
+            summary=summary,
+            suggestion_key=s.get("id") or f"{s.get('symbol', '')}-{s.get('action', '')}",
+            action=s.get("action", ""),
+            symbol=s.get("symbol", ""),
+            qty=s.get("qty", ""),
+            price=s.get("price", ""),
+            urgency=s.get("urgency", "medium"),
+            thesis=s.get("thesis", ""),
+            data_points_json=json.dumps(s.get("data_points", []), ensure_ascii=False),
+            affordability_json=(
+                json.dumps(s["affordability"], ensure_ascii=False)
+                if s.get("affordability") else None
+            ),
+        )
+        db.add(row)
+        rows.append(row)
+    db.commit()
+    for r in rows:
+        db.refresh(r)
+    return rows
+
+
+def _row_to_dict(row: SuggestionRow) -> dict:
     return {
-        **result,
-        "cache_hit": False,
-        "generated_at": datetime.fromtimestamp(now_ts, timezone.utc).isoformat(),
+        "id": row.suggestion_key,
+        "row_id": row.row_id,
+        "action": row.action,
+        "symbol": row.symbol,
+        "qty": row.qty,
+        "price": row.price,
+        "urgency": row.urgency,
+        "thesis": row.thesis,
+        "data_points": json.loads(row.data_points_json) if row.data_points_json else [],
+        "affordability": json.loads(row.affordability_json) if row.affordability_json else None,
+        "dismissed": row.dismissed_at is not None,
+        "adopted_decision_id": row.adopted_decision_id,
     }
+
+
+def _batch_to_response(rows: list[SuggestionRow], cache_hit: bool) -> dict:
+    if not rows:
+        return _empty_response("暂无建议")
+    first = rows[0]
+    # 默认前端只展示未驳回的（保持原 UX），但 row_id + dismissed flag 都传过去
+    return {
+        "generated_at": _ensure_utc(first.generated_at).isoformat(),
+        "cache_hit": cache_hit,
+        "batch_id": first.batch_id,
+        "summary": first.summary,
+        "suggestions": [_row_to_dict(r) for r in rows if r.dismissed_at is None],
+    }
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """SQLite 存的 naive datetime 当 UTC 用"""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def dismiss_suggestion(db: Session, row_id: str) -> bool:
+    row = db.get(SuggestionRow, row_id)
+    if not row:
+        return False
+    if row.dismissed_at is None:
+        row.dismissed_at = datetime.now(timezone.utc)
+        db.commit()
+    return True
+
+
+def mark_suggestion_adopted(db: Session, suggestion_key: str, decision_id: str) -> None:
+    """create_decision 时若带 source_suggestion_id，回写到最新匹配的 suggestion 上"""
+    row = (
+        db.query(SuggestionRow)
+        .filter(SuggestionRow.suggestion_key == suggestion_key)
+        .filter(SuggestionRow.adopted_decision_id.is_(None))
+        .order_by(SuggestionRow.generated_at.desc())
+        .first()
+    )
+    if row:
+        row.adopted_decision_id = decision_id
+        db.commit()
+
+
+def list_suggestion_history(db: Session, days: int = 7) -> list[dict]:
+    """按 batch 分组返回历史，每个 batch 含其下所有 suggestions（含已驳回 / 已采纳）。
+    days 限定时间窗。
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = (
+        db.query(SuggestionRow)
+        .filter(SuggestionRow.generated_at >= cutoff)
+        .order_by(SuggestionRow.generated_at.desc(), SuggestionRow.row_id.asc())
+        .all()
+    )
+    batches: dict[str, dict] = {}
+    for r in rows:
+        b = batches.setdefault(r.batch_id, {
+            "batch_id": r.batch_id,
+            "generated_at": _ensure_utc(r.generated_at).isoformat(),
+            "summary": r.summary,
+            "suggestions": [],
+        })
+        b["suggestions"].append(_row_to_dict(r))
+    return list(batches.values())
 
 
 def _identify_issues(account, positions: list[dict]) -> list[str]:
@@ -293,13 +423,6 @@ def _parse_json(text: str) -> dict:
             "suggestions": [],
             "_raw": text[:500],
         }
-
-
-def _cache_key(positions, account) -> str:
-    """positions hash + 当日 + 账户欠款，保证持仓/欠款一变就重新生成"""
-    symbols = "_".join(sorted(p.symbol for p in positions))
-    debt = int(account.outstanding_debt or 0)
-    return f"{datetime.now().strftime('%Y%m%d')}::{symbols}::debt{debt}"
 
 
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
