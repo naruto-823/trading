@@ -12,6 +12,7 @@ import logging
 import time
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from fastapi.concurrency import run_in_threadpool
 
@@ -39,28 +40,18 @@ async def run_broker_sync() -> None:
 
 
 def register(sched: AsyncIOScheduler) -> None:
-    """注册两个 cron 触发器：
-    - 白天高频（北京时间 09:00-翌日 05:00 = UTC 01:00-21:00）：每 5 min
-    - 深夜低频（UTC 21:00-翌日 01:00）：每 30 min
-    """
-    # 周一到周五 + 周末也跑（盘后/夜盘可能有美股动作）
+    """长桥账户同步：白天 (UTC 01-20) 每 5min + 深夜 (UTC 21-00:30) 每 30min。
+    合并成 1 个 job、OrTrigger 多触发器，避免面板里两条同名的混淆。"""
     sched.add_job(
         run_broker_sync,
-        trigger=CronTrigger(minute="*/5", hour="1-20", timezone="UTC"),
+        trigger=OrTrigger([
+            CronTrigger(minute="*/5", hour="1-20", timezone="UTC"),
+            CronTrigger(minute="0,30", hour="21-23,0", timezone="UTC"),
+        ]),
         id=JOB_ID,
-        name="长桥账户同步（白天 5min）",
-        replace_existing=True,
-        max_instances=1,        # 不让上一次没跑完时排队叠加
-        coalesce=True,           # 错过的 fire 合并成一次
-        misfire_grace_time=120,
-    )
-    sched.add_job(
-        run_broker_sync,
-        trigger=CronTrigger(minute="0,30", hour="21-23,0", timezone="UTC"),
-        id=f"{JOB_ID}-night",
-        name="长桥账户同步（深夜 30min）",
+        name="长桥账户同步（白天 5min / 深夜 30min）",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=300,
+        misfire_grace_time=120,
     )

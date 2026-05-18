@@ -16,6 +16,7 @@ import logging
 import time
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from fastapi.concurrency import run_in_threadpool
 
@@ -26,6 +27,7 @@ from app.workers.scheduler import record_duration
 
 logger = logging.getLogger(__name__)
 
+JOB_ID = "ai-refresh"
 BRIEFING_JOB_ID = "briefing-refresh"
 SUGGESTIONS_JOB_ID = "suggestions-refresh"
 
@@ -59,7 +61,7 @@ async def run_suggestions_refresh() -> None:
         record_duration(SUGGESTIONS_JOB_ID, int((time.time() - t0) * 1000))
 
 
-# 五个关键时刻，5 cron 之间共用：
+# 5 个关键市场时刻（UTC）—— 工作日触发
 KEY_HOURS_UTC = [
     ("hk_open", 1, 30),
     ("hk_close", 8, 0),
@@ -70,24 +72,26 @@ KEY_HOURS_UTC = [
 
 
 def register(sched: AsyncIOScheduler) -> None:
-    """对每个关键时刻注册 briefing + suggestions 各一个 job
-    （5 时刻 × 2 内容 = 10 job，太多。改成：每个时刻一个 job，里面同时刷两个）"""
-    for tag, hour, minute in KEY_HOURS_UTC:
-        sched.add_job(
-            _run_both,
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour=hour,
-                minute=minute,
-                timezone="UTC",
-            ),
-            id=f"refresh-{tag}",
-            name=f"AI 复盘+建议刷新（{tag}）",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=600,  # 错过 10min 内还跑
+    """1 个 job + OrTrigger 多个 cron。面板里就一行，不再 5 条同名混淆。"""
+    triggers = [
+        CronTrigger(
+            day_of_week="mon-fri",
+            hour=hour,
+            minute=minute,
+            timezone="UTC",
         )
+        for _tag, hour, minute in KEY_HOURS_UTC
+    ]
+    sched.add_job(
+        _run_both,
+        trigger=OrTrigger(triggers),
+        id=JOB_ID,
+        name="AI 复盘+建议刷新（工作日 5 个市场时刻）",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
+    )
 
 
 async def _run_both() -> None:
