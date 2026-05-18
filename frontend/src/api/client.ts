@@ -24,6 +24,14 @@ async function request<T>(
   return response.json();
 }
 
+export interface CashInfoBreakdown {
+  currency: string;
+  available: number;
+  withdraw: number;
+  frozen: number;
+  settling: number;
+}
+
 export async function getAccount() {
   return request<{
     id: number;
@@ -34,6 +42,23 @@ export async function getAccount() {
     market_value: number;
     total_pnl: number;
     day_pnl: number;
+    realized_day_pnl: number;
+    // 今日已卖出标的对当日盈亏的贡献，按市场拆分（原币）。
+    // Position.day_pnl 只覆盖当前仍持仓的，前端需要把这里的市场金额叠加到对应卡片。
+    realized_day_pnl_by_market: Record<string, number>;
+    // 融资 / 保证金（全部 HKD 口径）
+    max_finance_amount: number;
+    remaining_finance_amount: number;
+    // 实际融资欠款（HKD），与长桥 app "融资欠款"字段一致（负数表示借款）
+    outstanding_debt: number;
+    init_margin: number;
+    maintenance_margin: number;
+    buy_power: number;
+    margin_call: number;
+    risk_level: number;
+    cash_infos: CashInfoBreakdown[];
+    // 同步时刻的汇率快照，键形如 "HKD_CNY" / "USD_HKD" / "USD_CNY" / "CNY_HKD"
+    fx_rates: Record<string, number>;
   }>("/account");
 }
 
@@ -147,7 +172,7 @@ export interface QuoteData {
   post_market_price: number;
   post_market_change: number;
   post_market_change_ratio: number;
-  trading_session: "pre" | "regular" | "post" | "closed";
+  trading_session: "pre" | "regular" | "post" | "overnight" | "closed";
   change: number;
   change_ratio: number;
   timestamp: string;
@@ -180,6 +205,73 @@ export async function syncAll() {
       error: string | null;
     }>
   >("/sync/all", { method: "POST" });
+}
+
+export interface BriefingHeadline {
+  title: string;
+  url: string;
+}
+
+export interface BriefingStock {
+  symbol: string;
+  headlines: BriefingHeadline[];
+  bullish: string;
+  bearish: string;
+  suggestion: string;
+}
+
+export interface BriefingContextItem {
+  name: string;
+  price: number | null;
+  change_percent: number | null;
+}
+
+export interface BriefingData {
+  generated_at: string;
+  cache_hit: boolean;
+  market_summary: string;
+  stocks: BriefingStock[];
+  overall_action: string;
+  context: Record<string, BriefingContextItem>;
+}
+
+export async function getBriefing(forceRefresh = false) {
+  const qs = forceRefresh ? "?force_refresh=true" : "";
+  return request<BriefingData>(`/dashboard/briefing${qs}`);
+}
+
+export type SuggestionAction = "stop_loss" | "sell" | "buy" | "add";
+export type SuggestionUrgency = "high" | "medium" | "low";
+
+export interface SuggestionAffordability {
+  status: "ok" | "tight" | "over";
+  cost_hkd: number;
+  buy_power_hkd: number;
+  ratio_pct: number;
+}
+
+export interface Suggestion {
+  id: string;
+  action: SuggestionAction;
+  symbol: string;
+  qty: string;
+  price: string;
+  urgency: SuggestionUrgency;
+  thesis: string;
+  data_points: string[];
+  affordability?: SuggestionAffordability;
+}
+
+export interface SuggestionsData {
+  generated_at: string;
+  cache_hit: boolean;
+  summary: string;
+  suggestions: Suggestion[];
+}
+
+export async function getSuggestions(forceRefresh = false) {
+  const qs = forceRefresh ? "?force_refresh=true" : "";
+  return request<SuggestionsData>(`/decisions/suggestions${qs}`);
 }
 
 export async function getSyncLogs(limit = 20) {

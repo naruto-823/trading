@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, Wallet, TrendingUp, BarChart3, DollarSign, CalendarDays, Wifi, WifiOff, RotateCcw } from "lucide-react";
 import {
@@ -11,8 +11,10 @@ import {
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import MarketStatus from "@/components/MarketStatus";
+import BriefingCard from "@/components/BriefingCard";
 import { useQuoteWebSocket } from "@/hooks/useQuoteWebSocket";
 import { formatCurrency, formatPercent, pnlColor } from "@/lib/utils";
+import { evaluatePosition } from "@/lib/positionRules";
 
 type QuoteMap = Record<string, QuoteData>;
 
@@ -112,8 +114,51 @@ export default function Dashboard() {
       (sum, pos) => sum + pos.day_pnl * USD_TO_HKD_FALLBACK,
       0
     );
-    return hkDayPnl + usDayPnl + optionDayPnl;
+    // 已卖出标的的当日贡献：来自账户快照，按市场原币 → HKD
+    const realizedByMarket = account.realized_day_pnl_by_market ?? {};
+    const realizedHkd = Object.entries(realizedByMarket).reduce((sum, [market, amount]) => {
+      if (market === "US") return sum + amount * USD_TO_HKD_FALLBACK;
+      return sum + amount;
+    }, 0);
+    return hkDayPnl + usDayPnl + optionDayPnl + realizedHkd;
   }, [hkPositions, usStockPositions, usOptionPositions, usQuoteMap, account]);
+
+  // 今日已卖出标的对当日盈亏的贡献（原币、按市场拆分）。Position 表丢失了已卖完的标的，
+  // 这里要单独叠加进对应市场卡片的 dayPnl 总和。
+  const soldTodayByMarket = account?.realized_day_pnl_by_market ?? {};
+  const hkSoldToday = soldTodayByMarket["HK"] ?? 0;
+  const usSoldToday = soldTodayByMarket["US"] ?? 0;
+
+  // 用于计算持仓集中度：把所有持仓的市值统一归一到 HKD
+  const totalPortfolioHkd = useMemo(() => {
+    const hk = hkPositions.reduce((s, p) => s + Math.abs(p.market_value), 0);
+    const us = [...usStockPositions, ...usOptionPositions].reduce(
+      (s, p) => s + Math.abs(p.market_value) * USD_TO_HKD_FALLBACK,
+      0,
+    );
+    return hk + us;
+  }, [hkPositions, usStockPositions, usOptionPositions]);
+
+  // 顶部卡片显示币种切换（HKD / CNY / USD），后端记账始终用 HKD
+  type DisplayCurrency = "HKD" | "CNY" | "USD";
+  const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency>(() => {
+    const saved = (typeof window !== "undefined" && localStorage.getItem("dashboard.displayCurrency")) as DisplayCurrency | null;
+    return saved === "CNY" || saved === "USD" ? saved : "HKD";
+  });
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      localStorage.setItem("dashboard.displayCurrency", displayCurrency);
+    }
+  }, [displayCurrency]);
+
+  // 把 HKD 值转成当前展示币种
+  const fxRates = account?.fx_rates ?? {};
+  const fromHkd = (hkd: number): number => {
+    if (displayCurrency === "HKD") return hkd;
+    if (displayCurrency === "CNY") return hkd * (fxRates.HKD_CNY ?? 0.87);
+    if (displayCurrency === "USD") return hkd / (fxRates.USD_HKD ?? 7.83);
+    return hkd;
+  };
 
   return (
     <div className="p-6 space-y-6">
@@ -145,9 +190,38 @@ export default function Dashboard() {
         </Button>
       </div>
 
+      {/* AI 复盘卡片：顶部，可折叠 */}
+      <BriefingCard />
+
       {/* Account Cards */}
       {account && (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <>
+          {/* 顶部币种切换 */}
+          <div className="flex items-center justify-end gap-2 text-xs">
+            <span className="text-muted-foreground">显示币种</span>
+            <div className="inline-flex rounded-md border bg-background overflow-hidden">
+              {(["HKD","CNY","USD"] as const).map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setDisplayCurrency(c)}
+                  className={`px-2.5 py-1 transition-colors ${
+                    displayCurrency === c
+                      ? "bg-foreground text-background font-medium"
+                      : "hover:bg-muted text-muted-foreground"
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            {displayCurrency !== "HKD" && fxRates.HKD_CNY && (
+              <span className="text-muted-foreground ml-1">
+                · 1 HKD = {(displayCurrency === "CNY" ? fxRates.HKD_CNY : 1 / (fxRates.USD_HKD ?? 7.83)).toFixed(4)} {displayCurrency}
+              </span>
+            )}
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">净资产</CardTitle>
@@ -155,7 +229,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {formatCurrency(account.net_assets, account.currency)}
+                {formatCurrency(fromHkd(account.net_assets), displayCurrency)}
               </div>
             </CardContent>
           </Card>
@@ -167,7 +241,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {formatCurrency(account.market_value, account.currency)}
+                {formatCurrency(fromHkd(account.market_value), displayCurrency)}
               </div>
             </CardContent>
           </Card>
@@ -179,7 +253,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {formatCurrency(account.total_cash, account.currency)}
+                {formatCurrency(fromHkd(account.total_cash), displayCurrency)}
               </div>
             </CardContent>
           </Card>
@@ -191,7 +265,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className={`text-2xl font-bold ${pnlColor(liveTotalPnl ?? account.total_pnl)}`}>
-                {formatCurrency(liveTotalPnl ?? account.total_pnl, account.currency)}
+                {formatCurrency(fromHkd(liveTotalPnl ?? account.total_pnl), displayCurrency)}
               </div>
               {liveTotalPnl !== null && liveTotalPnl !== account.total_pnl && (
                 <p className="text-xs text-muted-foreground mt-1">实时估算</p>
@@ -206,14 +280,44 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className={`text-2xl font-bold ${pnlColor(liveDayPnl ?? account.day_pnl)}`}>
-                {formatCurrency(liveDayPnl ?? account.day_pnl, account.currency)}
+                {formatCurrency(fromHkd(liveDayPnl ?? account.day_pnl), displayCurrency)}
               </div>
               {liveDayPnl !== null && liveDayPnl !== account.day_pnl && (
                 <p className="text-xs text-muted-foreground mt-1">实时估算</p>
               )}
             </CardContent>
           </Card>
-        </div>
+
+          {(() => {
+            const debt = account.outstanding_debt ?? 0;
+            const hasDebt = debt < 0;
+            const debtPctOfNet = hasDebt && account.net_assets > 0
+              ? (Math.abs(debt) / account.net_assets) * 100
+              : 0;
+            return (
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium">融资欠款</CardTitle>
+                  <DollarSign className="h-4 w-4 text-muted-foreground" />
+                </CardHeader>
+                <CardContent>
+                  <div className={`text-2xl font-bold ${hasDebt ? "" : "text-muted-foreground"}`}>
+                    {formatCurrency(fromHkd(debt), displayCurrency)}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {hasDebt ? `占净资产 ${debtPctOfNet.toFixed(1)}%` : "未使用融资"}
+                  </p>
+                </CardContent>
+              </Card>
+            );
+          })()}
+          </div>
+        </>
+      )}
+
+      {/* 融资 / 保证金信息 */}
+      {account && (account.max_finance_amount > 0 || account.cash_infos?.length) && (
+        <FinancingCard account={account} />
       )}
 
       {!account && !accountQuery.isLoading && (
@@ -233,36 +337,43 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {hkPositions.length > 0 && (
+      {(hkPositions.length > 0 || hkSoldToday !== 0) && (
         <PositionTable
           title="🇭🇰 港股持仓"
           positions={hkPositions}
           summary={{
             marketValue: hkPositions.reduce((s, p) => s + p.market_value, 0),
             pnl: hkPositions.reduce((s, p) => s + p.unrealized_pnl, 0),
-            dayPnl: hkPositions.reduce((s, p) => s + p.day_pnl, 0),
+            dayPnl: hkPositions.reduce((s, p) => s + p.day_pnl, 0) + hkSoldToday,
             currency: "HKD",
           }}
+          totalPortfolioHkd={totalPortfolioHkd}
+          usdToHkd={USD_TO_HKD_FALLBACK}
+          extraDayPnlNote={hkSoldToday !== 0 ? `含今日已平仓 ${formatCurrency(hkSoldToday, "HKD")}` : undefined}
         />
       )}
 
-      {usStockPositions.length > 0 && (
+      {(usStockPositions.length > 0 || usSoldToday !== 0) && (
         <PositionTable
           title="🇺🇸 美股持仓"
           positions={usStockPositions}
           summary={{
             marketValue: usStockPositions.reduce((s, p) => s + p.market_value, 0),
             pnl: usStockPositions.reduce((s, p) => s + p.unrealized_pnl, 0),
-            dayPnl: usStockPositions.reduce((s, p) => s + p.day_pnl, 0),
+            dayPnl: usStockPositions.reduce((s, p) => s + p.day_pnl, 0) + usSoldToday,
             currency: "USD",
           }}
           quoteMap={usQuoteMap}
+          totalPortfolioHkd={totalPortfolioHkd}
+          usdToHkd={USD_TO_HKD_FALLBACK}
+          extraDayPnlNote={usSoldToday !== 0 ? `含今日已平仓 ${formatCurrency(usSoldToday, "USD")}` : undefined}
         />
       )}
 
       {usOptionPositions.length > 0 && (
         <PositionTable
           title="🇺🇸 美股期权"
+          titleWarning="⚠ 期权敞口需密切关注：到期日、IV 变化、对冲缺口"
           positions={usOptionPositions}
           summary={{
             marketValue: usOptionPositions.reduce((s, p) => s + p.market_value, 0),
@@ -270,6 +381,8 @@ export default function Dashboard() {
             dayPnl: usOptionPositions.reduce((s, p) => s + p.day_pnl, 0),
             currency: "USD",
           }}
+          totalPortfolioHkd={totalPortfolioHkd}
+          usdToHkd={USD_TO_HKD_FALLBACK}
         />
       )}
     </div>
@@ -301,19 +414,32 @@ type PositionRow = {
 
 function PositionTable({
   title,
+  titleWarning,
   positions,
   summary,
   quoteMap,
+  totalPortfolioHkd,
+  usdToHkd,
+  extraDayPnlNote,
 }: {
   title: string;
+  titleWarning?: string;
   positions: PositionRow[];
   summary: PositionSummary;
   quoteMap?: QuoteMap;
+  totalPortfolioHkd: number;
+  usdToHkd: number;
+  extraDayPnlNote?: string;
 }) {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle>{title}</CardTitle>
+        <div className="flex flex-col gap-1">
+          <CardTitle>{title}</CardTitle>
+          {titleWarning && (
+            <span className="text-xs text-amber-600 dark:text-amber-500">{titleWarning}</span>
+          )}
+        </div>
         <div className="flex items-center gap-4 text-sm">
           <span className="text-muted-foreground">
             市值 <span className="font-medium text-foreground">{formatCurrency(summary.marketValue, summary.currency)}</span>
@@ -329,6 +455,9 @@ function PositionTable({
             <span className={`font-medium ${pnlColor(summary.dayPnl)}`}>
               {formatCurrency(summary.dayPnl, summary.currency)}
             </span>
+            {extraDayPnlNote && (
+              <span className="ml-2 text-xs text-muted-foreground">({extraDayPnlNote})</span>
+            )}
           </span>
         </div>
       </CardHeader>
@@ -344,6 +473,7 @@ function PositionTable({
                 <th className="pb-3 font-medium text-right">现价</th>
                 <th className="pb-3 font-medium text-right">收盘价</th>
                 <th className="pb-3 font-medium text-right">市值</th>
+                <th className="pb-3 font-medium text-right">占组合</th>
                 <th className="pb-3 font-medium text-right">浮动盈亏</th>
                 <th className="pb-3 font-medium text-right">盈亏比例</th>
                 <th className="pb-3 font-medium text-right">当日盈亏</th>
@@ -360,6 +490,9 @@ function PositionTable({
                 const liveMktValue = quote
                   ? Math.abs(pos.quantity) * livePrice
                   : pos.market_value;
+                // 集中度 + 杠杆识别
+                const hkdValue = pos.currency === "USD" ? liveMktValue * usdToHkd : liveMktValue;
+                const rule = evaluatePosition(pos.symbol, pos.name, hkdValue, totalPortfolioHkd);
                 const livePnl = quote
                   ? (livePrice - pos.cost_price) * pos.quantity
                   : pos.unrealized_pnl;
@@ -380,7 +513,14 @@ function PositionTable({
                 return (
                   <tr key={pos.id} className="border-b last:border-0">
                     <td className="py-3 font-medium">{pos.symbol}</td>
-                    <td className="py-3 text-muted-foreground">{pos.name}</td>
+                    <td className="py-3 text-muted-foreground">
+                      <span>{pos.name}</span>
+                      {rule.kindTag && (
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-500">
+                          {rule.kindTag}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-3 text-right">{pos.quantity}</td>
                     <td className="py-3 text-right">{pos.cost_price.toFixed(2)}</td>
                     <td className="py-3 text-right">
@@ -391,6 +531,10 @@ function PositionTable({
                     </td>
                     <td className="py-3 text-right">
                       {formatCurrency(liveMktValue, pos.currency)}
+                    </td>
+                    <td className={`py-3 text-right font-medium ${rule.warn ? "text-red-600" : "text-muted-foreground"}`}>
+                      {(rule.ratio * 100).toFixed(1)}%
+                      {rule.warn && <span className="ml-0.5">⚠</span>}
                     </td>
                     <td className={`py-3 text-right font-medium ${pnlColor(livePnl)}`}>
                       {formatCurrency(livePnl, pos.currency)}
@@ -418,6 +562,7 @@ function PositionTable({
 const SESSION_BADGE: Record<string, { label: string; cls: string }> = {
   pre: { label: "盘前", cls: "bg-amber-100 text-amber-700" },
   post: { label: "盘后", cls: "bg-sky-100 text-sky-700" },
+  overnight: { label: "夜盘", cls: "bg-purple-100 text-purple-700" },
 };
 
 function PriceCell({ price, quote, prevClose }: { price: number; quote?: QuoteData; prevClose: number }) {
@@ -428,14 +573,15 @@ function PriceCell({ price, quote, prevClose }: { price: number; quote?: QuoteDa
   const session = quote.trading_session;
   const badge = SESSION_BADGE[session];
 
-  // 副标题：盘前/盘后时显示对应的涨跌（用正确的收盘价重新计算）
+  // 副标题：在延伸时段（盘前/盘后/夜盘）展示相对正式收盘的偏离
+  // price 主显示的是延伸时段成交价（current_price），副标显示其相对 regular 收盘 (last_done) 的变化
   let subline: { value: number; ratio: number } | null = null;
   if (session === "pre" && quote.pre_market_price > 0 && prevClose > 0) {
     const change = quote.pre_market_price - prevClose;
     subline = { value: change, ratio: (change / prevClose) * 100 };
-  } else if (session === "post" && quote.post_market_price > 0 && prevClose > 0) {
-    const change = quote.post_market_price - prevClose;
-    subline = { value: change, ratio: (change / prevClose) * 100 };
+  } else if ((session === "post" || session === "overnight") && quote.post_market_price > 0 && quote.last_done > 0) {
+    const change = quote.post_market_price - quote.last_done;
+    subline = { value: change, ratio: (change / quote.last_done) * 100 };
   }
 
   return (
@@ -491,5 +637,82 @@ function WsStatusBadge({ status }: { status: WsStatus }) {
       {icon}
       {label}
     </span>
+  );
+}
+
+type AccountData = NonNullable<Awaited<ReturnType<typeof getAccount>>["data"]>;
+
+function FinancingCard({ account }: { account: AccountData }) {
+  const marginUtilization = account.maintenance_margin > 0 && account.net_assets > 0
+    ? (account.maintenance_margin / account.net_assets) * 100
+    : 0;
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">保证金 / 现金明细</CardTitle>
+        {account.margin_call ? (
+          <span className="text-xs font-medium text-red-600">⚠ 触发追保</span>
+        ) : (
+          <span className="text-xs text-muted-foreground">风险等级 {account.risk_level}</span>
+        )}
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-4 md:grid-cols-3 text-sm">
+          {/* 保证金占用 */}
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">维持保证金 / 净资产</div>
+            <div className={`text-lg font-bold ${marginUtilization > 80 ? "text-red-600" : marginUtilization > 60 ? "text-amber-600" : ""}`}>
+              {marginUtilization.toFixed(1)}%
+            </div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              维 {formatCurrency(account.maintenance_margin, account.currency)}
+              {" · "}
+              初 {formatCurrency(account.init_margin, account.currency)}
+            </div>
+          </div>
+
+          {/* 购买力 */}
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">可用购买力</div>
+            <div className="text-lg font-bold">{formatCurrency(account.buy_power, account.currency)}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">剩余可融 {formatCurrency(account.remaining_finance_amount, account.currency)}</div>
+          </div>
+
+          {/* 融资额度概览 */}
+          <div>
+            <div className="text-xs text-muted-foreground mb-1">融资总额度</div>
+            <div className="text-lg font-bold">{formatCurrency(account.max_finance_amount, account.currency)}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">
+              已用 {formatCurrency(account.max_finance_amount - account.remaining_finance_amount, account.currency)}
+            </div>
+          </div>
+        </div>
+
+        {/* 按币种现金明细 */}
+        {account.cash_infos?.length > 0 && (
+          <div className="mt-4 pt-3 border-t">
+            <div className="text-xs text-muted-foreground mb-2">现金明细（按币种）</div>
+            <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4 text-xs">
+              {account.cash_infos.map((ci) => (
+                <div key={ci.currency} className="flex flex-col">
+                  <div className="flex justify-between">
+                    <span className="font-medium">{ci.currency}</span>
+                    <span className={ci.available < 0 ? "font-medium text-red-600" : "font-medium"}>
+                      {formatCurrency(ci.available, ci.currency)}
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground mt-0.5">
+                    {ci.available < 0 ? "账户透支借款" : "可用"}
+                    {ci.frozen > 0 && (
+                      <span className="ml-1.5">· 冻结 {formatCurrency(ci.frozen, ci.currency)}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
