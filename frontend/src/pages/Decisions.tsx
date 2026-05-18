@@ -1,9 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, CheckCircle2, XCircle, AlertTriangle, Clock, Sparkles, RefreshCw, ChevronDown, ChevronUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { getSuggestions, type Suggestion } from "@/api/client";
+import {
+  createDecision,
+  deleteDecision,
+  getSuggestions,
+  listDecisions,
+  updateDecisionStatus,
+  type DecisionApi,
+  type DecisionCreatePayload,
+  type Suggestion,
+} from "@/api/client";
 
 type Action = "buy" | "sell" | "add" | "stop_loss";
 type Status = "pending" | "executed" | "abandoned";
@@ -32,6 +41,9 @@ interface Decision {
   cooldownHours: number;
   // 如果用户把冷静期改为 0（紧急执行），强制写时效原因
   urgentReason?: string;
+  // 来源追踪（用于 AI 建议采纳率分析）
+  source?: string;
+  sourceSuggestionId?: string;
 }
 
 const STORAGE_KEY = "decisions.v1";
@@ -58,7 +70,47 @@ const ACTION_COLOR: Record<Action, string> = {
   stop_loss: "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-500",
 };
 
-function load(): Decision[] {
+// ====== API ↔ 内部 shape 互转 ======
+// 内部一直用 camelCase（form / row 都写好了），后端用 snake_case + ms 时间戳。
+
+function apiToInternal(d: DecisionApi): Decision {
+  return {
+    id: d.id,
+    createdAt: d.created_at_ms,
+    status: d.status,
+    executedAt: d.executed_at_ms ?? undefined,
+    action: d.action,
+    symbol: d.symbol,
+    qty: d.qty,
+    price: d.price,
+    thesis: d.thesis,
+    checklist: d.checklist ?? undefined,
+    cooldownHours: d.cooldown_hours,
+    urgentReason: d.urgent_reason ?? undefined,
+    source: d.source,
+    sourceSuggestionId: d.source_suggestion_id ?? undefined,
+  };
+}
+
+function internalToCreatePayload(d: Decision): DecisionCreatePayload {
+  return {
+    id: d.id,
+    action: d.action,
+    symbol: d.symbol,
+    qty: d.qty,
+    price: d.price,
+    thesis: d.thesis,
+    cooldown_hours: d.cooldownHours,
+    urgent_reason: d.urgentReason ?? null,
+    checklist: d.checklist ?? null,
+    source: d.source ?? "manual",
+    source_suggestion_id: d.sourceSuggestionId ?? null,
+    created_at_ms: d.createdAt,
+  };
+}
+
+// ====== localStorage 旧数据迁移（一次性） ======
+function readLegacyDecisions(): Decision[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
@@ -69,8 +121,8 @@ function load(): Decision[] {
   }
 }
 
-function save(items: Decision[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+function clearLegacyDecisions() {
+  localStorage.removeItem(STORAGE_KEY);
 }
 
 function relativeTime(ts: number): string {
@@ -85,14 +137,58 @@ function relativeTime(ts: number): string {
 }
 
 export default function Decisions() {
-  const [items, setItems] = useState<Decision[]>(() => load());
+  const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   // 从 AI 建议"采纳"过来的预填内容，传给 NewDecisionForm 当 initial
   const [formInitial, setFormInitial] = useState<Partial<Decision> | null>(null);
 
+  const query = useQuery({
+    queryKey: ["decisions"],
+    queryFn: () => listDecisions(),
+  });
+  const items: Decision[] = useMemo(() => {
+    const list = query.data?.data ?? [];
+    return list.map(apiToInternal);
+  }, [query.data]);
+
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["decisions"] });
+
+  const createMutation = useMutation({
+    mutationFn: (d: Decision) => createDecision(internalToCreatePayload(d)),
+    onSuccess: invalidate,
+  });
+  const statusMutation = useMutation({
+    mutationFn: ({ id, status }: { id: string; status: "executed" | "abandoned" }) =>
+      updateDecisionStatus(id, status),
+    onSuccess: invalidate,
+  });
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => deleteDecision(id),
+    onSuccess: invalidate,
+  });
+
+  // 一次性迁移：localStorage 的旧数据搬到后端（只在 query 成功且后端空 + localStorage 有数据时做）
+  const migratedRef = useRef(false);
   useEffect(() => {
-    save(items);
-  }, [items]);
+    if (migratedRef.current) return;
+    if (query.isLoading || query.isError) return;
+    const legacy = readLegacyDecisions();
+    if (legacy.length === 0) return;
+    migratedRef.current = true;
+    // 串行 POST 避免并发把后端搞混
+    (async () => {
+      for (const d of legacy) {
+        try {
+          await createDecision(internalToCreatePayload(d));
+        } catch (e) {
+          console.warn("migrate decision failed", d.id, e);
+        }
+      }
+      clearLegacyDecisions();
+      invalidate();
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query.isLoading, query.isError]);
 
   const grouped = useMemo(() => {
     const now = Date.now();
@@ -120,17 +216,18 @@ export default function Decisions() {
     };
   }, [items]);
 
-  const update = (id: string, patch: Partial<Decision>) => {
-    setItems((prev) => prev.map((d) => (d.id === id ? { ...d, ...patch } : d)));
+  // 这两个状态变更只支持已执行 / 作废（pending 不暴露）—— 跟原前端语义一致
+  const markStatus = (id: string, status: "executed" | "abandoned") => {
+    statusMutation.mutate({ id, status });
   };
 
   const remove = (id: string) => {
     if (!confirm("删除这条决策记录？")) return;
-    setItems((prev) => prev.filter((d) => d.id !== id));
+    deleteMutation.mutate(id);
   };
 
   const add = (d: Decision) => {
-    setItems((prev) => [d, ...prev]);
+    createMutation.mutate(d);
     setShowForm(false);
     setFormInitial(null);
   };
@@ -143,6 +240,8 @@ export default function Decisions() {
       qty: s.qty,
       price: s.price,
       thesis: `${s.thesis}\n\n【AI 引用的数据点】\n${s.data_points.map((d) => `· ${d}`).join("\n")}`,
+      source: "ai_suggestion",
+      sourceSuggestionId: s.id,
     });
     setShowForm(true);
     // 滚到表单
@@ -194,8 +293,8 @@ export default function Decisions() {
               d={d}
               badge={`${relativeTime(d.createdAt)} · ${remainText}`}
               badgeCls="text-blue-600"
-              onExecuted={() => update(d.id, { status: "executed", executedAt: Date.now() })}
-              onAbandon={() => update(d.id, { status: "abandoned" })}
+              onExecuted={() => markStatus(d.id, "executed")}
+              onAbandon={() => markStatus(d.id, "abandoned")}
               onDelete={() => remove(d.id)}
             />
           );
@@ -215,8 +314,8 @@ export default function Decisions() {
             badge={`${relativeTime(d.createdAt)}${d.urgentReason ? " · ⚡紧急" : ""}`}
             badgeCls="text-amber-600 font-medium"
             highlight
-            onExecuted={() => update(d.id, { status: "executed", executedAt: Date.now() })}
-            onAbandon={() => update(d.id, { status: "abandoned" })}
+            onExecuted={() => markStatus(d.id, "executed")}
+            onAbandon={() => markStatus(d.id, "abandoned")}
             onDelete={() => remove(d.id)}
           />
         )}
@@ -438,6 +537,8 @@ function NewDecisionForm({
             exitPlan: exitPlan.trim(),
           }
         : undefined,
+      source: initial?.source,
+      sourceSuggestionId: initial?.sourceSuggestionId,
     };
     onSubmit(decision);
   };

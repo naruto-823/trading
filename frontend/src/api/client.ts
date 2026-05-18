@@ -274,6 +274,76 @@ export async function getSuggestions(forceRefresh = false) {
   return request<SuggestionsData>(`/decisions/suggestions${qs}`);
 }
 
+// ===== 决策日志（后端持久化）=====
+
+export type DecisionAction = "buy" | "sell" | "add" | "stop_loss";
+export type DecisionStatus = "pending" | "executed" | "abandoned";
+
+export interface DecisionChecklist {
+  currentLossPct: string;
+  isLeveraged: boolean;
+  thesisChanged: string;
+  willExceedConcentration: boolean;
+  catalyst: string;
+  exitPlan: string;
+}
+
+export interface DecisionApi {
+  id: string;
+  created_at_ms: number;
+  status: DecisionStatus;
+  executed_at_ms: number | null;
+  action: DecisionAction;
+  symbol: string;
+  qty: string;
+  price: string;
+  thesis: string;
+  cooldown_hours: number;
+  urgent_reason: string | null;
+  checklist: DecisionChecklist | null;
+  source: string;
+  source_suggestion_id: string | null;
+}
+
+export interface DecisionCreatePayload {
+  id?: string;
+  action: DecisionAction;
+  symbol: string;
+  qty?: string;
+  price?: string;
+  thesis?: string;
+  cooldown_hours: number;
+  urgent_reason?: string | null;
+  checklist?: DecisionChecklist | null;
+  source?: string;
+  source_suggestion_id?: string | null;
+  created_at_ms?: number;
+}
+
+export async function listDecisions() {
+  return request<DecisionApi[]>("/decisions");
+}
+
+export async function createDecision(payload: DecisionCreatePayload) {
+  return request<DecisionApi>("/decisions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateDecisionStatus(id: string, status: DecisionStatus) {
+  return request<DecisionApi>(`/decisions/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function deleteDecision(id: string) {
+  return request<{ id: string; deleted: boolean }>(`/decisions/${id}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getSyncLogs(limit = 20) {
   return request<
     Array<{

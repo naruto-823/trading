@@ -29,7 +29,7 @@ app.add_middleware(
 )
 
 # 注册路由
-from app.api import account, briefing, chat, health, quotes, suggestions, sync, trades, ws  # noqa: E402
+from app.api import account, briefing, chat, decisions, health, quotes, suggestions, sync, trades, ws  # noqa: E402
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(account.router, prefix="/api", tags=["account"])
@@ -40,3 +40,4 @@ app.include_router(chat.router, prefix="/api", tags=["chat"])
 app.include_router(ws.router, prefix="/api", tags=["ws"])
 app.include_router(briefing.router, prefix="/api", tags=["briefing"])
 app.include_router(suggestions.router, prefix="/api", tags=["suggestions"])
+app.include_router(decisions.router, prefix="/api", tags=["decisions"])

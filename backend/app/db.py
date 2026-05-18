@@ -36,6 +36,9 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
+    # 显式触发模型导入，确保 Base.metadata 注册所有表（新增模型只需在 models/__init__.py 暴露即可）
+    import app.models  # noqa: F401
+
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
 
