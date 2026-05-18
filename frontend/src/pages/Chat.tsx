@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Send, Bot, User, Loader2, Wrench } from "lucide-react";
+import { Send, Bot, User, Loader2, Wrench, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface Message {
@@ -21,13 +21,47 @@ const QUICK_PROMPTS = [
   "帮我同步一下最新数据",
 ];
 
+const STORAGE_KEY = "chat.messages";
+
+function loadMessages(): Message[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (m): m is Message =>
+        m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
 export default function Chat() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>(() => loadMessages());
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // 每次消息变化时落 localStorage，跨路由切换保留历史
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
+    } catch {
+      // localStorage 满了或被禁用，静默忽略
+    }
+  }, [messages]);
+
+  const clearMessages = useCallback(() => {
+    if (isStreaming) return;
+    if (messages.length === 0) return;
+    if (!confirm("确定清空所有对话历史？")) return;
+    setMessages([]);
+    setToolStatus(null);
+  }, [isStreaming, messages.length]);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -150,6 +184,23 @@ export default function Chat() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Top bar：消息数 + 清空按钮（仅在有消息时显示） */}
+      {messages.length > 0 && (
+        <div className="flex items-center justify-between border-b px-6 py-2 text-xs text-muted-foreground">
+          <span>共 {messages.length} 条历史消息</span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clearMessages}
+            disabled={isStreaming}
+            className="h-7 text-xs"
+          >
+            <Trash2 className="h-3 w-3 mr-1" />
+            清空对话
+          </Button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-6 space-y-4">
         {messages.length === 0 && (
