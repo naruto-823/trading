@@ -20,9 +20,10 @@ class Settings(BaseSettings):
     ai_model: str = "claude-sonnet-4-20250514"
     ai_provider: str = "openai"
 
-    # 兼容旧配置
+    # Anthropic 原生协议（/v1/messages），给 briefing.py 用
     anthropic_api_key: str = ""
     anthropic_base_url: str = ""
+    anthropic_model: str = "claude-opus-4-7"
 
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
