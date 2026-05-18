@@ -5,18 +5,21 @@ import {
   TrendingUp,
   MessageSquare,
   ClipboardCheck,
+  Bell,
 } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import Executions from "./pages/Executions";
 import PnL from "./pages/PnL";
 import Chat from "./pages/Chat";
 import Decisions from "./pages/Decisions";
+import Alerts from "./pages/Alerts";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/executions", label: "成交记录", icon: ArrowLeftRight },
   { to: "/pnl", label: "盈亏分析", icon: TrendingUp },
   { to: "/decisions", label: "决策日志", icon: ClipboardCheck },
+  { to: "/alerts", label: "价格告警", icon: Bell },
   { to: "/chat", label: "AI 助手", icon: MessageSquare },
 ];
 
@@ -59,6 +62,7 @@ export default function App() {
           <Route path="/executions" element={<Executions />} />
           <Route path="/pnl" element={<PnL />} />
           <Route path="/decisions" element={<Decisions />} />
+          <Route path="/alerts" element={<Alerts />} />
           <Route path="/chat" element={<Chat />} />
         </Routes>
       </main>

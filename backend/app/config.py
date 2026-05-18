@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     anthropic_model: str = "claude-opus-4-7"
 
+    # Telegram 推送（market-watcher 触发告警时发送）
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 

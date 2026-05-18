@@ -391,6 +391,80 @@ export async function runJob(jobId: string) {
   );
 }
 
+// ===== 告警规则 + Telegram =====
+
+export type AlertCondition =
+  | "price_above"
+  | "price_below"
+  | "day_change_pct_above"
+  | "day_change_pct_below";
+
+export interface AlertApi {
+  id: string;
+  created_at_ms: number;
+  enabled: boolean;
+  symbol: string;
+  condition: AlertCondition;
+  threshold: number;
+  note: string;
+  cooldown_minutes: number;
+  last_triggered_at_ms: number | null;
+  trigger_count: number;
+}
+
+export interface AlertCreatePayload {
+  symbol: string;
+  condition: AlertCondition;
+  threshold: number;
+  note?: string;
+  cooldown_minutes?: number;
+  enabled?: boolean;
+}
+
+export interface AlertUpdatePayload {
+  enabled?: boolean;
+  threshold?: number;
+  note?: string;
+  cooldown_minutes?: number;
+  condition?: AlertCondition;
+  reset_cooldown?: boolean;
+}
+
+export async function listAlerts() {
+  return request<AlertApi[]>("/alerts");
+}
+
+export async function createAlert(payload: AlertCreatePayload) {
+  return request<AlertApi>("/alerts", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAlert(id: string, payload: AlertUpdatePayload) {
+  return request<AlertApi>(`/alerts/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAlert(id: string) {
+  return request<{ id: string; deleted: boolean }>(`/alerts/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export async function getNotifyStatus() {
+  return request<{ configured: boolean }>("/alerts/notify/status");
+}
+
+export async function testNotify() {
+  return request<{ ok: boolean; detail: unknown }>(
+    "/alerts/notify/test",
+    { method: "POST" },
+  );
+}
+
 export async function getSyncLogs(limit = 20) {
   return request<
     Array<{
