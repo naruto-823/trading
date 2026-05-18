@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-4-7"
 
     # Bark iOS 推送（market-watcher 触发告警时发送）
-    # device_key 在 Bark app 首页可以一键复制；base_url 默认官方公服，自部署填自己的
+    # device_key = Bark app 首页 URL 里 api.day.app/ 后面那段（22 字符）
     bark_device_key: str = ""
     bark_base_url: str = "https://api.day.app"
 
