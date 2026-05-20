@@ -68,6 +68,7 @@ def _apply_lightweight_migrations() -> None:
         ("event_notification", "direction", "VARCHAR(20)"),
         ("event_notification", "confidence", "INTEGER"),
         ("event_notification", "affected_tickers_json", "TEXT"),
+        ("event_notification", "debate_json", "TEXT"),
     ]
     for table, column, ddl in added:
         if table not in insp.get_table_names():

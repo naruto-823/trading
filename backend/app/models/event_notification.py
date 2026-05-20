@@ -34,7 +34,7 @@ class EventNotification(Base):
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     push_status: Mapped[str] = mapped_column(String(40), default="sent")
-    # sent / failed / skipped_low_relevance（Quick Assess 评分不达阈值，不推 Bark）
+    # sent / failed / skipped_low_relevance / debating(已升级辩论,等 verdict)
     push_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Quick Assess 多维度评分（LLM 输出）
@@ -51,6 +51,10 @@ class EventNotification(Base):
     confidence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 受影响的重仓 ticker 列表（JSON 数组字符串）
     affected_tickers_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # 辩论评分结果(升级到 debate_scorer 的快讯)
+    # JSON: {research_brief, bull, bear, judge_reasoning, winning_side}
+    debate_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # 复合索引：常按 symbol + 时间倒序查
