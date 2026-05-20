@@ -11,22 +11,20 @@
 from __future__ import annotations
 
 import hashlib
+import json as _json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-import json as _json
-
 from app.config import settings
 from app.models.event_notification import EventNotification
+from app.services.debate_queue import reconcile_stale_debates, submit_debate
+from app.services.debate_scorer import should_escalate
 from app.services.macro_feed import MacroFlash, fetch_macro_news
 from app.services.notify import send_bark
 from app.services.relevance_scorer import score_relevance
-from app.services.debate_queue import reconcile_stale_debates, submit_debate
-from app.services.debate_scorer import should_escalate
-
 
 # direction → emoji（push title 用，让你锁屏一眼看出 bullish/bearish）
 _DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
@@ -172,7 +170,8 @@ def run_macro_flash(db: Session) -> dict[str, int]:
         body_lines = []
         if scoring["sentiment"] != "neutral":
             sent_label = "利好" if scoring["sentiment"] == "positive" else "利空"
-            body_lines.append(f"{sent_label} · 看{('涨' if scoring['direction']=='bullish' else '跌' if scoring['direction']=='bearish' else '平')} · 可信度 {scoring['confidence']}%")
+            dir_cn = "涨" if scoring["direction"] == "bullish" else "跌" if scoring["direction"] == "bearish" else "平"
+            body_lines.append(f"{sent_label} · 看{dir_cn} · 可信度 {scoring['confidence']}%")
         body_lines.append(item.content if item.content and item.content != item.title else item.title)
         body = "\n".join(body_lines)[:400]
         level = "timeSensitive" if item.importance >= 5 else "active"

@@ -20,19 +20,19 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-_DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
-
 from app.config import settings
 from app.db import SessionLocal
 from app.models.event_notification import EventNotification
+from app.services.debate_queue import submit_debate
+from app.services.debate_scorer import should_escalate
 from app.services.macro_feed import MacroFlash
 from app.services.macro_pusher import matches_keywords
 from app.services.notify import send_bark
 from app.services.relevance_scorer import score_relevance
-from app.services.debate_queue import submit_debate
-from app.services.debate_scorer import should_escalate
 
 logger = logging.getLogger(__name__)
+
+_DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
 
 _browser_task: asyncio.Task | None = None
 _state: dict[str, Any] = {
