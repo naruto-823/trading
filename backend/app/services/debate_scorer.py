@@ -170,7 +170,8 @@ def _run_judge(
             system=JUDGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user}],
         )
-        return json.loads(_extract_json(resp))
+        data = json.loads(_extract_json(resp))
+        return data if isinstance(data, dict) else None
     except Exception as exc:
         logger.warning("debate judge failed: %s", exc)
         return None
@@ -193,9 +194,7 @@ def _verdict_from_triage(triage: dict, note: str) -> dict:
     }
 
 
-def _normalize_verdict(
-    judged: dict, bull: dict | None, bear: dict | None, brief: str
-) -> dict:
+def _normalize_verdict(judged: dict) -> dict:
     """把判官原始输出 clamp/规范成 DebateVerdict。"""
     relevance = judged.get("relevance")
     if relevance not in _VALID_RELEVANCE:
@@ -215,10 +214,10 @@ def _normalize_verdict(
     affected = [str(t).upper().strip() for t in affected if t][:3]
     return {
         "relevance": relevance,
-        "score": max(0, min(100, int(judged.get("score", 0)))),
+        "score": max(0, min(100, int(float(judged.get("score", 0) or 0)))),
         "sentiment": sentiment,
         "direction": direction,
-        "confidence": max(0, min(100, int(judged.get("confidence", 50)))),
+        "confidence": max(0, min(100, int(float(judged.get("confidence", 50) or 50)))),
         "affected_tickers": affected,
         "reason": str(judged.get("reason", ""))[:200],
         "bull_case": str(judged.get("bull_case", ""))[:400],
@@ -266,4 +265,8 @@ def run_debate(content: str, triage: dict, position_ctx: str) -> dict:
     if judged is None:
         return _verdict_from_triage(triage, "判官失败")
 
-    return _normalize_verdict(judged, bull, bear, brief)
+    try:
+        return _normalize_verdict(judged)
+    except Exception as exc:
+        logger.warning("debate verdict normalize failed: %s", exc)
+        return _verdict_from_triage(triage, "结果归一化失败")

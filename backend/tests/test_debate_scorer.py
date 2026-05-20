@@ -112,3 +112,50 @@ def test_run_debate_both_advocates_fail_falls_back():
         verdict = debate_scorer.run_debate("x", _TRIAGE, "ctx")
     assert verdict["model"] == "debate-degraded"
     assert verdict["score"] == 55
+
+
+def test_run_debate_judge_float_string_score_no_crash():
+    """判官返回字符串型 float 分数,run_debate 不能抛异常,且能正确归一化。"""
+    advocate_payload = {
+        "stance_score": 70, "key_points": [],
+        "strongest_argument": "", "risks_to_own_view": "",
+    }
+    judge_bad = {**_JUDGE_PAYLOAD, "score": "72.5", "confidence": "60.0"}
+
+    def _route(*args, **kwargs):
+        if "判官" in kwargs.get("system", ""):
+            return _fake_resp(judge_bad)
+        return _fake_resp(advocate_payload)
+
+    with patch.object(debate_scorer, "Anthropic") as mock_cls, \
+         patch.object(debate_scorer, "gather_research", return_value=""), \
+         patch.object(debate_scorer.settings, "anthropic_api_key", "k"):
+        mock_cls.return_value.messages.create.side_effect = _route
+        verdict = debate_scorer.run_debate("x", _TRIAGE, "ctx")
+    assert verdict["score"] == 72
+    assert verdict["confidence"] == 60
+    assert verdict["model"] == "debate"
+
+
+def test_run_debate_one_advocate_fails_still_judges():
+    """一方辩手挂了,判官用存活的一方继续裁,仍出 debate verdict。"""
+    advocate_payload = {
+        "stance_score": 70, "key_points": ["p"],
+        "strongest_argument": "a", "risks_to_own_view": "r",
+    }
+
+    def _route(*args, **kwargs):
+        system = kwargs.get("system", "")
+        if "判官" in system:
+            return _fake_resp(_JUDGE_PAYLOAD)
+        if "看空辩手" in system:
+            raise RuntimeError("bear down")
+        return _fake_resp(advocate_payload)
+
+    with patch.object(debate_scorer, "Anthropic") as mock_cls, \
+         patch.object(debate_scorer, "gather_research", return_value=""), \
+         patch.object(debate_scorer.settings, "anthropic_api_key", "k"):
+        mock_cls.return_value.messages.create.side_effect = _route
+        verdict = debate_scorer.run_debate("x", _TRIAGE, "ctx")
+    assert verdict["model"] == "debate"
+    assert verdict["score"] == 72
