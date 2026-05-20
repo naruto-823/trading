@@ -29,6 +29,8 @@ from app.services.macro_feed import MacroFlash
 from app.services.macro_pusher import matches_keywords
 from app.services.notify import send_bark
 from app.services.relevance_scorer import score_relevance
+from app.services.debate_queue import submit_debate
+from app.services.debate_scorer import should_escalate
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +175,22 @@ def _process_flash_sync(flash: dict[str, Any]) -> None:
             confidence=scoring["confidence"],
             affected_tickers_json=affected_json,
         )
+
+        # 两阶段门控:高 stakes 快讯升级到完整辩论(异步,不在此处推送)
+        if should_escalate(scoring, item.importance):
+            rec = EventNotification(
+                **common_kwargs,
+                importance="high" if flash.get("is_important") else "medium",
+                title=content[:200],
+                body=content[:500],
+                push_status="debating",
+                push_error=None,
+            )
+            db.add(rec)
+            db.commit()
+            submit_debate(rec.id)
+            logger.info("jin10-browser escalated to debate: %s", content[:60])
+            return
 
         if score < settings.relevance_threshold:
             rec = EventNotification(
