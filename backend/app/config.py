@@ -51,6 +51,24 @@ class Settings(BaseSettings):
     relevance_threshold: int = 50
     relevance_model: str = "claude-haiku-4-5-20251001"
 
+    # —— 辩论评分引擎 (debate scorer) ——
+    # spec: docs/superpowers/specs/2026-05-20-debate-scorer-design.md
+    debate_enabled: bool = True
+    debate_bull_model: str = "claude-haiku-4-5-20251001"
+    debate_bear_model: str = "claude-haiku-4-5-20251001"
+    debate_judge_model: str = "claude-sonnet-4-6"
+    # 升级判定:triage score 落在 [lo, hi] 临界带 → 升级辩论
+    debate_escalate_score_lo: int = 35
+    debate_escalate_score_hi: int = 65
+    # 源 importance ≥ 此值(如 FOMC/CPI)→ 升级辩论
+    debate_escalate_min_importance: int = 5
+    debate_timeout_seconds: int = 90
+    debate_zombie_minutes: int = 5  # debating 行超过此分钟数 → 对账强制收尾
+    debate_max_workers: int = 2
+    debate_websearch_enabled: bool = True
+    debate_websearch_max_uses: int = 3
+    debate_daily_cap: int = 0  # 0=不限;>0 时超额当天降级走 triage
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 
