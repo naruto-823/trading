@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -75,6 +75,7 @@ def start_scheduler() -> None:
     from app.workers.market_watcher_worker import register as register_market_watcher
     from app.workers.overnight_quote_worker import register as register_overnight_quote
     from app.workers.refresh_worker import register as register_refresh
+    from app.workers.suggestions_worker import register as register_suggestions
 
     register_broker_sync(sched)
     register_refresh(sched)
@@ -84,6 +85,7 @@ def start_scheduler() -> None:
     register_calendar_briefing(sched)
     register_overnight_quote(sched)
     register_daily_baseline(sched)
+    register_suggestions(sched)
 
     sched.start()
     logger.info("Scheduler started with %d jobs: %s",
