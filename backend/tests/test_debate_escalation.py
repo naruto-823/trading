@@ -29,6 +29,13 @@ def _triage(**over):
     (_triage(score=90), 3, False),
     # triage 自己 fail-open → 不升级
     ({**_triage(score=100), "model": "fail-open"}, 5, False),
-])
+], ids=["named-ticker", "high-importance", "score-50-midband", "score-35-lo-edge", "score-65-hi-edge", "score-20-noise", "score-90-no-ticker", "fail-open-triage"])
 def test_should_escalate(triage, importance, expected):
     assert should_escalate(triage, importance) is expected
+
+
+def test_should_escalate_disabled(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "debate_enabled", False)
+    # 即使点名持仓 + 高 importance,debate_enabled=False 也必须不升级
+    assert should_escalate(_triage(affected_tickers=["NVDA"]), 5) is False
