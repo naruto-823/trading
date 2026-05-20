@@ -256,6 +256,9 @@ def _persist_batch(
                 json.dumps(s["affordability"], ensure_ascii=False)
                 if s.get("affordability") else None
             ),
+            debate_json=(
+                json.dumps(s["debate"], ensure_ascii=False) if s.get("debate") else None
+            ),
         )
         db.add(row)
         rows.append(row)
@@ -277,6 +280,7 @@ def _row_to_dict(row: SuggestionRow) -> dict:
         "thesis": row.thesis,
         "data_points": json.loads(row.data_points_json) if row.data_points_json else [],
         "affordability": json.loads(row.affordability_json) if row.affordability_json else None,
+        "debate": json.loads(row.debate_json) if row.debate_json else None,
         "dismissed": row.dismissed_at is not None,
         "adopted_decision_id": row.adopted_decision_id,
     }
