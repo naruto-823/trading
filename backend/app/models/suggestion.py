@@ -37,6 +37,10 @@ class Suggestion(Base):
     data_points_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     affordability_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # 辩论复核结果(Phase 2):{direction, winning_side, confidence, consistency,
+    # bull_case, bear_case, judge_reasoning}
+    debate_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # 用户后续动作
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     adopted_decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
