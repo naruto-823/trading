@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -10,7 +12,7 @@ from app.db import Base
 
 
 @pytest.fixture
-def db_session() -> Session:
+def db_session() -> Generator[Session, None, None]:
     """内存 SQLite session,每个测试 fresh 建表。StaticPool 保证内存库跨连接存活。"""
     engine = create_engine(
         "sqlite://",
