@@ -28,11 +28,10 @@ from app.services.briefing import (
     fetch_news_for_symbol,
 )
 from app.services.positions import list_positions
+from app.services import suggestion_debate
 from app.services.yahoo_quote import fetch_yahoo_quotes
 
 logger = logging.getLogger(__name__)
-
-CACHE_TTL_SECONDS = 30 * 60  # 30 分钟内的最新批次直接复用，不重新生成
 
 # 杠杆 ETF / 期权识别（跟前端 positionRules.ts 保持口径一致）
 LEVERAGED_KEYWORDS = ["2x", "3x", "Bull", "Bear", "Leveraged", "Daily Long", "Daily Short"]
@@ -162,14 +161,14 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
     if not positions or not account:
         return _empty_response("暂无持仓数据，请先同步")
 
-    # 优先复用 DB 里的最新批次（cache_hit）
+    # 按需读取:只返回 worker 产出的最新批次,绝不内联重算(Phase 2)。
+    # freshness 由 suggestions_worker 负责;force_refresh=True 才完整重算。
     if not force_refresh:
         latest_batch = _load_latest_batch(db)
-        if latest_batch is not None:
-            generated_at, rows = latest_batch
-            age = datetime.now(timezone.utc) - _ensure_utc(generated_at)
-            if age < timedelta(seconds=CACHE_TTL_SECONDS):
-                return _batch_to_response(rows, cache_hit=True)
+        if latest_batch is None:
+            return _empty_response("建议尚未生成,等下次定时刷新或手动刷新")
+        _, rows = latest_batch
+        return _batch_to_response(rows, cache_hit=True)
 
     # 占比分母 = 净资产（含现金），跟 briefing / portfolio_analysis 统一口径
     pct_denom_hkd = float(account.net_assets or 0)
@@ -208,6 +207,13 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
         buy_power_hkd=account.buy_power or 0,
         held_positions=enriched_positions,
     )
+
+    # 辩论复核(Phase 2):对每条建议跑看多/看空辩论,矛盾→标注+降 urgency。
+    # 包 try/except —— 辩论失败也不能丢 Opus 建议。
+    try:
+        suggestion_debate.debate_batch(result.get("suggestions", []))
+    except Exception as exc:
+        logger.warning("debate_batch 失败,落库未复核批次: %s", exc)
 
     # 持久化这一批
     batch_id = uuid.uuid4().hex
