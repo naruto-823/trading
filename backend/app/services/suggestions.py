@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.suggestion import Suggestion as SuggestionRow
 from app.services import fx as fx_service
+from app.services import suggestion_debate
 from app.services.account import get_latest_account
 from app.services.briefing import (
     HTTP_HEADERS,
@@ -28,7 +29,6 @@ from app.services.briefing import (
     fetch_news_for_symbol,
 )
 from app.services.positions import list_positions
-from app.services import suggestion_debate
 from app.services.yahoo_quote import fetch_yahoo_quotes
 
 logger = logging.getLogger(__name__)
@@ -152,8 +152,10 @@ def _enrich_positions(positions, pct_denom_hkd: float, db: Session | None = None
 def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
     """生成 AI 决策建议。
 
-    持久化策略：每次新生成的一批入库（共享 batch_id + generated_at）。
-    30 分钟内的最新批次直接复用，避免重复烧钱。重启后从 DB 恢复，不再丢。
+    持久化策略:每次新生成的一批入库(共享 batch_id + generated_at)。
+    force_refresh=False:只读 DB 里 worker 产出的最新批次,绝不内联重算
+    (freshness 由 suggestions_worker 负责)。
+    force_refresh=True:完整重算(Opus 批量 + 辩论复核),供 worker / 用户手动刷新用。
     """
     positions = list_positions(db)
     account = get_latest_account(db)
