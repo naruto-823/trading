@@ -1,5 +1,3 @@
-from unittest.mock import patch
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.workers import suggestions_worker
@@ -18,4 +16,14 @@ async def test_run_suggestions_job_swallows_success(monkeypatch):
         suggestions_worker, "_run_once_sync", lambda: {"suggestions": [1, 2, 3]}
     )
     # 不抛异常即通过
+    await suggestions_worker.run_suggestions_job()
+
+
+async def test_run_suggestions_job_swallows_failure(monkeypatch):
+    def _boom() -> dict:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(suggestions_worker, "_run_once_sync", _boom)
+    # 异常必须被 run_suggestions_job 吞掉 —— worker 绝不能崩调度器。
+    # 此处不抛异常即通过。
     await suggestions_worker.run_suggestions_job()
