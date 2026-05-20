@@ -20,6 +20,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.db import SessionLocal
     from app.longbridge.realtime import start_realtime
     from app.services.daily_baseline import bootstrap_baseline_if_missing
+    from app.services.debate_queue import shutdown_debate_executor
     from app.workers import jin10_browser_worker
     from app.workers.scheduler import shutdown_scheduler, start_scheduler
 
@@ -37,6 +38,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     finally:
         await jin10_browser_worker.stop()
         shutdown_scheduler()
+        shutdown_debate_executor()
 
 
 app = FastAPI(title="AI Trading", version="0.1.0", lifespan=lifespan)

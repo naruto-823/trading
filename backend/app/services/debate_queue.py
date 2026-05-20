@@ -27,21 +27,21 @@ logger = logging.getLogger(__name__)
 _DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
 _DIR_LABEL = {"bullish": "看涨", "bearish": "看跌", "neutral": "中性"}
 
-_executor: ThreadPoolExecutor | None = None
-
-
-def _get_executor() -> ThreadPoolExecutor:
-    global _executor
-    if _executor is None:
-        _executor = ThreadPoolExecutor(
-            max_workers=settings.debate_max_workers, thread_name_prefix="debate"
-        )
-    return _executor
+# 模块级 eager 创建 —— ThreadPoolExecutor 首次 submit 前不起线程,construct 几乎零成本,
+# eager 比 lazy 省掉 check-then-act 竞态。
+_executor = ThreadPoolExecutor(
+    max_workers=settings.debate_max_workers, thread_name_prefix="debate"
+)
 
 
 def submit_debate(event_id: str) -> None:
     """把一条 debating 行的辩论任务丢进线程池(不阻塞调用方)。"""
-    _get_executor().submit(_safe_process, event_id)
+    _executor.submit(_safe_process, event_id)
+
+
+def shutdown_debate_executor() -> None:
+    """app 关闭时调用 —— 不等在途辩论(僵尸行对账会兜底未完成的)。"""
+    _executor.shutdown(wait=False)
 
 
 def _safe_process(event_id: str) -> None:

@@ -81,7 +81,7 @@ def test_reconcile_stale_debates_finalizes_zombie(db_session):
     assert n == 1
     row = db_session.query(EventNotification).filter_by(id="ev1").first()
     # relevance_score=55 ≥ 阈值50 → 用 triage 分推送收尾
-    assert row.push_status in ("sent", "failed")
+    assert row.push_status == "sent"
 
 
 def test_reconcile_skips_fresh_debating_row(db_session):
