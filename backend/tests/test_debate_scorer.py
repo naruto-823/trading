@@ -1,6 +1,8 @@
 import json
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+from app.models.position import Position
 from app.services import debate_scorer
 
 
@@ -161,11 +163,6 @@ def test_run_debate_one_advocate_fails_still_judges():
     assert verdict["score"] == 72
 
 
-from datetime import datetime
-
-from app.models.position import Position
-
-
 def _pos(symbol, name, qty, cost, cur, mv, pnl, ratio):
     return Position(
         synced_at=datetime.utcnow(), symbol=symbol, market="US", name=name,
@@ -194,3 +191,13 @@ def test_build_position_context_no_positions(db_session):
     with patch.object(debate_scorer, "SessionLocal", return_value=db_session):
         ctx = debate_scorer.build_position_context([])
     assert "无持仓" in ctx
+
+
+def test_build_position_context_matches_dotted_symbol(db_session):
+    """DB 里是 AAPL.US,affected_tickers 传裸 ticker AAPL,也要匹配上明细。"""
+    db_session.add(_pos("AAPL.US", "Apple", 20, 265.4, 298.3, 5966, 658, 0.124))
+    db_session.commit()
+    with patch.object(debate_scorer, "SessionLocal", return_value=db_session):
+        ctx = debate_scorer.build_position_context(["AAPL"])
+    assert "受影响标的明细" in ctx
+    assert "AAPL.US" in ctx
