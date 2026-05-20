@@ -24,6 +24,8 @@ from app.models.event_notification import EventNotification
 from app.services.macro_feed import MacroFlash, fetch_macro_news
 from app.services.notify import send_bark
 from app.services.relevance_scorer import score_relevance
+from app.services.debate_queue import reconcile_stale_debates, submit_debate
+from app.services.debate_scorer import should_escalate
 
 
 # direction → emoji（push title 用，让你锁屏一眼看出 bullish/bearish）
@@ -88,9 +90,10 @@ def run_macro_flash(db: Session) -> dict[str, int]:
     """跑一次：拉 macro_feed → 关键词过滤 → 去重 → Quick Assess → 阈值过 → 推 + 入库"""
     stats = {
         "fetched": 0, "filtered": 0, "deduped": 0,
-        "scored_low": 0, "fired": 0, "failed": 0,
+        "scored_low": 0, "escalated": 0, "fired": 0, "failed": 0,
     }
 
+    stats["reconciled"] = reconcile_stale_debates(db)
     items = fetch_macro_news(min_importance=MIN_IMPORTANCE_FOR_PUSH, hours_back=2, limit_per_source=20)
     stats["fetched"] = len(items)
 
@@ -127,6 +130,23 @@ def run_macro_flash(db: Session) -> dict[str, int]:
             confidence=scoring["confidence"],
             affected_tickers_json=affected_json,
         )
+
+        # 两阶段门控:高 stakes 快讯升级到完整辩论(异步,不在此处推送)
+        if should_escalate(scoring, item.importance):
+            rec = EventNotification(
+                **common_kwargs,
+                importance="high" if item.importance >= 5 else "medium",
+                title=item.title[:200],
+                body=(item.content or item.title)[:400],
+                push_status="debating",
+                push_error=None,
+            )
+            db.add(rec)
+            db.commit()
+            submit_debate(rec.id)
+            stats["escalated"] += 1
+            logger.info("macro-flash escalated to debate: %s", item.title[:60])
+            continue
 
         if score < settings.relevance_threshold:
             # 低分：不推 Bark，但仍落库
