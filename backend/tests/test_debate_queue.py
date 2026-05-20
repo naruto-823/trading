@@ -100,3 +100,14 @@ def test_format_debate_push_layout(db_session):
     assert "判官:看涨" in body
     assert "多:" in body and "空:" in body
     assert level == "timeSensitive"  # importance=high
+
+
+def test_apply_verdict_claim_prevents_double_finalize(db_session):
+    """同一 debating 行被两路收尾:第二次 _apply_verdict 抢不到行,不重复推送。"""
+    row = _debating_row(db_session)
+    with patch.object(debate_queue, "send_bark", return_value={"ok": True}) as mock_bark:
+        debate_queue._apply_verdict(db_session, row, _VERDICT)
+        debate_queue._apply_verdict(db_session, row, _VERDICT)
+    assert mock_bark.call_count == 1  # 只推一次
+    refreshed = db_session.query(EventNotification).filter_by(id="ev1").first()
+    assert refreshed.push_status == "sent"

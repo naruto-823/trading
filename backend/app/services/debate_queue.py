@@ -95,7 +95,26 @@ def format_debate_push(ev: EventNotification, verdict: dict) -> tuple[str, str, 
 
 
 def _apply_verdict(db: Session, ev: EventNotification, verdict: dict) -> None:
-    """把 verdict 写回行,按阈值决定推不推。"""
+    """把 verdict 写回行,按阈值决定推不推。
+
+    先用条件 UPDATE 原子抢占行(debating→finalizing)。抢不到 = 已被另一路
+    (消费者 / 僵尸行对账)收尾 → 直接返回,避免对同一事件双推 Bark。
+    残留风险:进程在本函数执行中(秒级窗口)硬崩溃会留下 finalizing 僵尸行,
+    概率可忽略;Phase 2 可加 claimed_at 时间戳彻底消除。
+    """
+    claimed = (
+        db.query(EventNotification)
+        .filter(
+            EventNotification.id == ev.id,
+            EventNotification.push_status == "debating",
+        )
+        .update({"push_status": "finalizing"}, synchronize_session=False)
+    )
+    db.commit()
+    if not claimed:
+        logger.info("debate row %s 已被收尾,跳过(避免双推)", ev.id)
+        return
+
     ev.relevance = verdict["relevance"]
     ev.relevance_score = verdict["score"]
     ev.relevance_reason = verdict["reason"]
