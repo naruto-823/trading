@@ -42,6 +42,7 @@ _state: dict[str, Any] = {
     "filtered": 0,
     "deduped": 0,
     "scored_low": 0,
+    "escalated": 0,
     "fired": 0,
     "last_received_at": None,
     "last_fired_at": None,
@@ -189,6 +190,7 @@ def _process_flash_sync(flash: dict[str, Any]) -> None:
             db.add(rec)
             db.commit()
             submit_debate(rec.id)
+            _state["escalated"] += 1
             logger.info("jin10-browser escalated to debate: %s", content[:60])
             return
 
