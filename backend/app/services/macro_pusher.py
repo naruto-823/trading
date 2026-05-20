@@ -89,7 +89,7 @@ def _format_push(item: MacroFlash) -> tuple[str, str]:
 def run_macro_flash(db: Session) -> dict[str, int]:
     """跑一次：拉 macro_feed → 关键词过滤 → 去重 → Quick Assess → 阈值过 → 推 + 入库"""
     stats = {
-        "fetched": 0, "filtered": 0, "deduped": 0,
+        "reconciled": 0, "fetched": 0, "filtered": 0, "deduped": 0,
         "scored_low": 0, "escalated": 0, "fired": 0, "failed": 0,
     }
 
