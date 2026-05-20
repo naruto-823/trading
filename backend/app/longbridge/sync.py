@@ -856,9 +856,16 @@ def sync_all(db: Session) -> list[SyncLog]:
     #   executions —— 依赖 orders（用 order_id 反查 side/currency）
     #   positions  —— 依赖 executions（期权当日盈亏拆分需要今日成交）
     #   account    —— 依赖 positions（汇总持仓浮动） + executions（已实现盈亏）
-    return [
+    logs = [
         sync_orders(db),
         sync_executions(db),
         sync_positions(db),
         sync_account(db),
     ]
+    # 让业务层 fx 服务下次取值时读到刚 sync 入库的最新汇率快照
+    try:
+        from app.services import fx as fx_service
+        fx_service.reset_cache()
+    except Exception:
+        pass
+    return logs

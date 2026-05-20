@@ -100,9 +100,10 @@ TOOL_DEFINITIONS = [
         "name": "analyze_portfolio",
         "description": (
             "对当前持仓进行多维度客观分析（仅做事实统计，不构成任何投资建议）。"
+            "所有 pct 字段以**账户净资产（含现金）**为分母（pct_basis 字段标注实际基底）。"
             "包含：summary（市值/货币/市场分布）、concentration（前 N 大持仓集中度）、"
             "pnl_distribution（盈亏分布、单标的最大盈/亏、当日涨跌幅前列）、"
-            "cost_structure（成本占比 vs 市值占比 漂移）、derivatives（期权多空敞口）、"
+            "cost_structure（成本占比 vs 净资产占比 漂移）、derivatives（期权多空敞口）、"
             "alerts（达到阈值的客观风险提示）。"
             "适用于用户询问 '分析我的仓位'、'仓位体检'、'集中度怎么样'、'今天哪些标的涨/跌得多' 等场景。"
         ),
@@ -110,6 +111,58 @@ TOOL_DEFINITIONS = [
             "type": "object",
             "properties": {},
             "required": [],
+        },
+    },
+    {
+        "name": "option_expiries",
+        "description": (
+            "获取某只美股 / 港股的可用期权到期日列表（ISO 日期，升序）。"
+            "Income 策略选合约时第一步：先看哪些到期日可选。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "标的代码，如 MSFT.US / TSLA.US"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "option_chain",
+        "description": (
+            "拉某到期日的全部 strike + call/put 期权代码。"
+            "可用 around + n 只取关心价位附近 ±N 档，避免数据过多。"
+            "返回字段：strike / call_symbol / put_symbol / standard。"
+            "下一步把感兴趣的 symbol 喂给 option_quote 拿 IV/HV/OI。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "标的代码，如 MSFT.US"},
+                "expiry": {"type": "string", "description": "ISO 日期，如 2026-06-18"},
+                "around": {"type": "number", "description": "可选：以此价格为中心截取附近合约"},
+                "n": {"type": "integer", "description": "around 模式下，上下各取 N 档，默认 15"},
+            },
+            "required": ["symbol", "expiry"],
+        },
+    },
+    {
+        "name": "option_quote",
+        "description": (
+            "拿一批期权合约的实时报价：last_done / IV / HV / open_interest / OHLC / volume。"
+            "Greeks 长桥 OpenAPI 不直接返回，需要做 BS 估算请用 IV + 标的价 + strike + DTE 自行算。"
+            "需 USOption 行情包。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbols": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "期权 symbol 数组，如 ['MSFT260618C440000.US']",
+                },
+            },
+            "required": ["symbols"],
         },
     },
     {
@@ -205,6 +258,42 @@ def execute_tool(tool_name: str, tool_input: dict, db: Session) -> str:
         elif tool_name == "analyze_portfolio":
             result = analyze_portfolio(db)
             return json.dumps(result, ensure_ascii=False, default=str)
+
+        elif tool_name == "option_expiries":
+            from app.longbridge import options as lb_options
+            symbol = tool_input.get("symbol", "")
+            if not symbol:
+                return json.dumps({"error": "symbol 不能为空"}, ensure_ascii=False)
+            return json.dumps(
+                {"symbol": symbol.upper(), "expiries": lb_options.get_expiries(symbol)},
+                ensure_ascii=False,
+            )
+
+        elif tool_name == "option_chain":
+            from app.longbridge import options as lb_options
+            symbol = tool_input.get("symbol", "")
+            expiry = tool_input.get("expiry", "")
+            around = tool_input.get("around")
+            n = int(tool_input.get("n", 15))
+            if not symbol or not expiry:
+                return json.dumps({"error": "symbol 和 expiry 都不能为空"}, ensure_ascii=False)
+            rows = lb_options.get_chain(symbol, expiry)
+            if around is not None and rows:
+                idx = min(range(len(rows)), key=lambda i: abs(rows[i].strike - float(around)))
+                lo, hi = max(0, idx - n), min(len(rows), idx + n + 1)
+                rows = rows[lo:hi]
+            return json.dumps(
+                {"symbol": symbol.upper(), "expiry": expiry, "strikes": [r.model_dump() for r in rows]},
+                ensure_ascii=False,
+            )
+
+        elif tool_name == "option_quote":
+            from app.longbridge import options as lb_options
+            symbols = tool_input.get("symbols", [])
+            if not symbols:
+                return json.dumps({"error": "symbols 不能为空"}, ensure_ascii=False)
+            rows = lb_options.get_option_quotes(symbols)
+            return json.dumps([r.model_dump() for r in rows], ensure_ascii=False)
 
         elif tool_name == "sync_now":
             kind = tool_input.get("kind", "all")

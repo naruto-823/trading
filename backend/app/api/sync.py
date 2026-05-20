@@ -28,6 +28,9 @@ def do_sync_all(db: Session = Depends(get_db)):
             "error": log.error,
         })
     has_error = any(r["status"] == "error" for r in results)
+    # 持仓变化后刷新实时订阅集
+    from app.longbridge.realtime import refresh_realtime_subscriptions
+    refresh_realtime_subscriptions()
     return {"data": results, "error": {"code": "SYNC_PARTIAL_FAIL", "message": "部分同步失败", "retryable": True} if has_error else None}
 
 
@@ -37,6 +40,9 @@ def do_sync_kind(kind: str, db: Session = Depends(get_db)):
     if not handler:
         return {"data": None, "error": {"code": "INVALID_KIND", "message": f"不支持的同步类型: {kind}", "retryable": False}}
     log = handler(db)
+    if kind == "positions" and log.status == "success":
+        from app.longbridge.realtime import refresh_realtime_subscriptions
+        refresh_realtime_subscriptions()
     return {
         "data": {"kind": log.kind, "status": log.status, "rows_written": log.rows_written, "error": log.error},
         "error": {"code": "SYNC_ERROR", "message": log.error, "retryable": True} if log.status == "error" else None,

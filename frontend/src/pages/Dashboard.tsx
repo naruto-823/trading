@@ -76,10 +76,10 @@ export default function Dashboard() {
   const { quoteMap: usQuoteMap, status: wsStatus } = useQuoteWebSocket(usStockSymbols);
 
   // 用实时报价聚合顶部账户卡片的总盈亏 / 当日盈亏
-  // 美股 USD → HKD 用与后端一致的 fallback 汇率（实际汇率由后端同步时写入账户快照）
-  const USD_TO_HKD_FALLBACK = 7.83;
+  // USD → HKD 用账户快照里的真实汇率（来自 LB SDK 实时拉取）；账户没快照时不强算
+  const usdHkd = account?.fx_rates?.USD_HKD ?? 0;
   const liveTotalPnl = useMemo(() => {
-    if (!account) return null;
+    if (!account || !usdHkd) return null;
     // 港股持仓：用 DB 快照（港股无盘前盘后，快照即最新）
     const hkPnl = hkPositions.reduce((sum, pos) => sum + pos.unrealized_pnl, 0);
     // 美股正股：用实时价回算
@@ -89,18 +89,18 @@ export default function Dashboard() {
         ? quote.current_price
         : pos.current_price;
       const pnl = (livePrice - pos.cost_price) * pos.quantity;
-      return sum + pnl * USD_TO_HKD_FALLBACK;
+      return sum + pnl * usdHkd;
     }, 0);
     // 期权：用 DB 快照（期权无盘前盘后报价）
     const optionPnl = usOptionPositions.reduce(
-      (sum, pos) => sum + pos.unrealized_pnl * USD_TO_HKD_FALLBACK,
+      (sum, pos) => sum + pos.unrealized_pnl * usdHkd,
       0
     );
     return hkPnl + usPnl + optionPnl;
-  }, [hkPositions, usStockPositions, usOptionPositions, usQuoteMap, account]);
+  }, [hkPositions, usStockPositions, usOptionPositions, usQuoteMap, account, usdHkd]);
 
   const liveDayPnl = useMemo(() => {
-    if (!account) return null;
+    if (!account || !usdHkd) return null;
     const hkDayPnl = hkPositions.reduce((sum, pos) => sum + pos.day_pnl, 0);
     const usDayPnl = usStockPositions.reduce((sum, pos) => {
       const quote = usQuoteMap[pos.symbol];
@@ -109,20 +109,20 @@ export default function Dashboard() {
         : pos.current_price;
       const prevClose = pos.prev_close ?? 0;
       const dayPnl = prevClose > 0 ? (livePrice - prevClose) * pos.quantity : pos.day_pnl;
-      return sum + dayPnl * USD_TO_HKD_FALLBACK;
+      return sum + dayPnl * usdHkd;
     }, 0);
     const optionDayPnl = usOptionPositions.reduce(
-      (sum, pos) => sum + pos.day_pnl * USD_TO_HKD_FALLBACK,
+      (sum, pos) => sum + pos.day_pnl * usdHkd,
       0
     );
     // 已卖出标的的当日贡献：来自账户快照，按市场原币 → HKD
     const realizedByMarket = account.realized_day_pnl_by_market ?? {};
     const realizedHkd = Object.entries(realizedByMarket).reduce((sum, [market, amount]) => {
-      if (market === "US") return sum + amount * USD_TO_HKD_FALLBACK;
+      if (market === "US") return sum + amount * usdHkd;
       return sum + amount;
     }, 0);
     return hkDayPnl + usDayPnl + optionDayPnl + realizedHkd;
-  }, [hkPositions, usStockPositions, usOptionPositions, usQuoteMap, account]);
+  }, [hkPositions, usStockPositions, usOptionPositions, usQuoteMap, account, usdHkd]);
 
   // 今日已卖出标的对当日盈亏的贡献（原币、按市场拆分）。Position 表丢失了已卖完的标的，
   // 这里要单独叠加进对应市场卡片的 dayPnl 总和。
@@ -133,14 +133,18 @@ export default function Dashboard() {
   // 用于计算持仓集中度：把所有持仓的市值统一归一到 HKD
   const totalPortfolioHkd = useMemo(() => {
     const hk = hkPositions.reduce((s, p) => s + Math.abs(p.market_value), 0);
-    const us = [...usStockPositions, ...usOptionPositions].reduce(
-      (s, p) => s + Math.abs(p.market_value) * USD_TO_HKD_FALLBACK,
-      0,
-    );
+    const us = usdHkd
+      ? [...usStockPositions, ...usOptionPositions].reduce(
+          (s, p) => s + Math.abs(p.market_value) * usdHkd,
+          0,
+        )
+      : 0;
     return hk + us;
-  }, [hkPositions, usStockPositions, usOptionPositions]);
+  }, [hkPositions, usStockPositions, usOptionPositions, usdHkd]);
 
   // 顶部卡片显示币种切换（HKD / CNY / USD），后端记账始终用 HKD
+  // HKD 是 source of truth（跟 LB APP 完全一致）；CNY / USD 走 fx 服务的实时汇率，
+  // 但因为 LB APP 内部 CNH 显示用了略微不同的 fx 源，CNH 显示会有 ~0.2% 的 noise。
   type DisplayCurrency = "HKD" | "CNY" | "USD";
   const [displayCurrency, setDisplayCurrency] = useState<DisplayCurrency>(() => {
     const saved = (typeof window !== "undefined" && localStorage.getItem("dashboard.displayCurrency")) as DisplayCurrency | null;
@@ -152,12 +156,12 @@ export default function Dashboard() {
     }
   }, [displayCurrency]);
 
-  // 把 HKD 值转成当前展示币种
+  // 把 HKD 值转成当前展示币种 — 用账户快照里的真实汇率，没快照时不换算（直接显示 HKD 值）
   const fxRates = account?.fx_rates ?? {};
   const fromHkd = (hkd: number): number => {
     if (displayCurrency === "HKD") return hkd;
-    if (displayCurrency === "CNY") return hkd * (fxRates.HKD_CNY ?? 0.87);
-    if (displayCurrency === "USD") return hkd / (fxRates.USD_HKD ?? 7.83);
+    if (displayCurrency === "CNY" && fxRates.HKD_CNY) return hkd * fxRates.HKD_CNY;
+    if (displayCurrency === "USD" && fxRates.USD_HKD) return hkd / fxRates.USD_HKD;
     return hkd;
   };
 
@@ -200,7 +204,7 @@ export default function Dashboard() {
       {/* Account Cards */}
       {account && (
         <>
-          {/* 顶部币种切换 */}
+          {/* 顶部币种切换：HKD 是 source of truth（跟 LB APP 一致），CNY/USD 为换算显示 */}
           <div className="flex items-center justify-end gap-2 text-xs">
             <span className="text-muted-foreground">显示币种</span>
             <div className="inline-flex rounded-md border bg-background overflow-hidden">
@@ -213,14 +217,24 @@ export default function Dashboard() {
                       ? "bg-foreground text-background font-medium"
                       : "hover:bg-muted text-muted-foreground"
                   }`}
+                  title={
+                    c === "HKD"
+                      ? "账户主币，跟长桥 APP 完全一致"
+                      : c === "CNY"
+                      ? "按 fx 服务实时汇率换算；与 LB APP 内部显示有 ~0.2% noise（不同 fx 源）"
+                      : "按 fx 服务实时汇率换算"
+                  }
                 >
                   {c}
                 </button>
               ))}
             </div>
-            {displayCurrency !== "HKD" && fxRates.HKD_CNY && (
+            {displayCurrency !== "HKD" && fxRates.HKD_CNY && fxRates.USD_HKD && (
               <span className="text-muted-foreground ml-1">
-                · 1 HKD = {(displayCurrency === "CNY" ? fxRates.HKD_CNY : 1 / (fxRates.USD_HKD ?? 7.83)).toFixed(4)} {displayCurrency}
+                · 1 HKD = {(displayCurrency === "CNY" ? fxRates.HKD_CNY : 1 / fxRates.USD_HKD).toFixed(4)} {displayCurrency}
+                {displayCurrency === "CNY" && (
+                  <span className="text-muted-foreground/70"> · 与 APP 有 ~0.2% noise</span>
+                )}
               </span>
             )}
           </div>
@@ -352,7 +366,7 @@ export default function Dashboard() {
             currency: "HKD",
           }}
           totalPortfolioHkd={totalPortfolioHkd}
-          usdToHkd={USD_TO_HKD_FALLBACK}
+          usdToHkd={usdHkd}
           extraDayPnlNote={hkSoldToday !== 0 ? `含今日已平仓 ${formatCurrency(hkSoldToday, "HKD")}` : undefined}
         />
       )}
@@ -369,7 +383,7 @@ export default function Dashboard() {
           }}
           quoteMap={usQuoteMap}
           totalPortfolioHkd={totalPortfolioHkd}
-          usdToHkd={USD_TO_HKD_FALLBACK}
+          usdToHkd={usdHkd}
           extraDayPnlNote={usSoldToday !== 0 ? `含今日已平仓 ${formatCurrency(usSoldToday, "USD")}` : undefined}
         />
       )}
@@ -386,7 +400,7 @@ export default function Dashboard() {
             currency: "USD",
           }}
           totalPortfolioHkd={totalPortfolioHkd}
-          usdToHkd={USD_TO_HKD_FALLBACK}
+          usdToHkd={usdHkd}
         />
       )}
     </div>

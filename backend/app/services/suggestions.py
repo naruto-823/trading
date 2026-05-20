@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.suggestion import Suggestion as SuggestionRow
+from app.services import fx as fx_service
 from app.services.account import get_latest_account
 from app.services.briefing import (
     HTTP_HEADERS,
@@ -32,8 +33,6 @@ from app.services.yahoo_quote import fetch_yahoo_quotes
 logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 30 * 60  # 30 分钟内的最新批次直接复用，不重新生成
-
-USD_TO_HKD_FALLBACK = 7.83
 
 # 杠杆 ETF / 期权识别（跟前端 positionRules.ts 保持口径一致）
 LEVERAGED_KEYWORDS = ["2x", "3x", "Bull", "Bear", "Leveraged", "Daily Long", "Daily Short"]
@@ -60,8 +59,8 @@ SYSTEM_PROMPT = """你是用户的**进攻型交易策略师**，不是风险经
 【你必须主动挖掘的机会类型】（不要只看持仓改不改）
 1. **期权 income 策略**：基于现有正股写 covered call、用现金担保 put（用户做过 META 590P 现在盈利 +52%，明显有这方面经验）
 2. **新建仓**：基于市场背景 + 新闻发现的**新机会**（不必是用户已有的标的）
-3. **主题轮动**：恒生科技 Q1 -15%+ 后的 mean reversion、AI 基建（VRT/ANET/MU）、利率敏感的金融/REITs
-4. **利率环境利用**：4.5%+ 的 10y 美债建仓窗口（TLT/IEF）
+3. **主题轮动**：基于输入新闻 + 宏观数据的实际证据，不要凭空列 ticker
+4. **利率环境利用**：当输入显示 10y 美债收益率高位时，可考虑 TLT/IEF 类
 5. **强势股加仓**（不是补仓亏损股）：基于新 catalyst 的强势标的逢低进场
 6. **载体替换**：杠杆 ETF → 正股；ITM call → 正股+covered call；等结构性优化
 
@@ -82,6 +81,17 @@ SYSTEM_PROMPT = """你是用户的**进攻型交易策略师**，不是风险经
   ]
 }
 
+【data_points 严格规则 — 这是最重要的一条】
+- **每一条 data_point 必须直接论证该建议的 thesis，且能用一句话连起来：「因为 [data_point]，所以 [thesis 的 X 部分]」**
+- 输入新闻按 symbol 分组喂给你，**每条新闻只能用于跟该 symbol 直接相关的建议的 thesis**
+  - 反面例子：用 "META 7000 员工转 AI" 论证买 MU——MU 的需求来自数据中心 HBM 销售，跟 META 内部组织调整无任何因果链。**这种跨标的"主题联想"严禁出现**
+  - 正面例子：买 GOOG 时引用 "GOOG-Blackstone 50亿 TPU 云合资" — 同一个 symbol 的新闻支撑该 symbol 的 thesis
+- **禁止主题词当 data point**："AI 基建主题轮动窗口" / "估值有空间" 这种**没有数字、没有事件、没有引用源**的措辞**严禁**
+- 每个 data_point 必须是下列之一：
+  - 具体百分比 / 美元金额（来自输入持仓 / 账户 / 市场背景）
+  - 一条输入里有的新闻标题（带 symbol 归属）
+  - 输入里给的具体宏观数字（原油价 / 指数涨跌幅 / 期货价等）
+
 【硬规则】
 1. **总数 5-8 条**，结构必须大致平衡：
    - 风险/防御类（stop_loss + sell + 还债）：**最多 2 条**，只保留高确信度结构性问题（如杠杆 ETF）
@@ -90,9 +100,13 @@ SYSTEM_PROMPT = """你是用户的**进攻型交易策略师**，不是风险经
 3. **不要为损失厌恶背书**：不要"组合健康继续持有"、不要"现金保留观望"
 4. **不推荐 add（补仓亏损股）**——但 buy 新仓（即使是用户已持有的标的）可以推荐
 5. thesis 必须基于具体数据，不能是"看好长期"
-6. data_points 必须引用**输入数据里有的真实数字**（持仓 / 提供的市场背景 / 新闻 / 宏观）
-7. urgency: high（本周）、medium（本月）、low（中长期）
-8. 涉及融资透支时，可以建议"用 X 的卖出资金还透支"，但**别让"还透支"占走超过 1 条建议**
+6. urgency: high（本周）、medium（本月）、low（中长期）
+7. 涉及融资透支时，可以建议"用 X 的卖出资金还透支"，但**别让"还透支"占走超过 1 条建议**
+8. **不要在思路里出现具体 ticker example 来源于本 prompt**——所有推荐标的必须来自：用户持仓 / 输入新闻提及的 symbol / 输入市场背景的 ETF 代码
+
+【仓位口径】
+- 输入字段 `占净资产%` 是该仓位 HKD 市值 ÷ 账户净资产（含现金）。集中度判断以此为准（>20% 算单一过重，>50% 算前 3 集中）
+- 不要把"持仓在 holdings 里的占比"（不含现金）当成"占组合"——会高估集中度
 
 【价格与事实声明 — 极其重要】
 - 输入的【持仓清单】里有标的的成本价和现价；【市场背景】里有指数 / 期货 / 原油等价格。**这些以外的标的价格你不知道。**
@@ -105,15 +119,19 @@ SYSTEM_PROMPT = """你是用户的**进攻型交易策略师**，不是风险经
 - 不要"组合整体健康"、"继续持有核心仓位"这种废话
 - 不要把所有建议都集中在"卖出 + 止损"
 - 不要不识别 covered call / 现金担保 put 等 income strategy，对这些不要建议平仓
-- **不要编具体股价、HBM 市场规模、财报日期、市占率数字等"硬事实"**——除非输入数据里有"""
+- **不要编具体股价、HBM 市场规模、财报日期、市占率数字等"硬事实"**——除非输入数据里有
+- **不要跨标的拼凑 data_points**（META 新闻 → MU 论据这种关联谬误）"""
 
 
-def _enrich_positions(positions, total_mv_hkd: float) -> list[dict]:
-    """给每只持仓加上：占组合 %、是否杠杆、是否期权"""
+def _enrich_positions(positions, pct_denom_hkd: float, db: Session | None = None) -> list[dict]:
+    """给每只持仓加上：占净资产 %、是否杠杆、是否期权
+
+    pct_denom_hkd: 占比分母（账户净资产 HKD）。跟 briefing / portfolio_analysis 统一口径。
+    """
     enriched = []
     for p in positions:
-        hkd_mv = p.market_value if p.currency == "HKD" else abs(p.market_value) * USD_TO_HKD_FALLBACK
-        ratio = abs(hkd_mv) / total_mv_hkd if total_mv_hkd > 0 else 0
+        hkd_mv = fx_service.to_hkd(abs(p.market_value), p.currency, db)
+        ratio = hkd_mv / pct_denom_hkd if pct_denom_hkd > 0 else 0
         enriched.append({
             "symbol": p.symbol,
             "name": p.name,
@@ -122,7 +140,7 @@ def _enrich_positions(positions, total_mv_hkd: float) -> list[dict]:
             "现价": p.current_price,
             "市值": p.market_value,
             "货币": p.currency,
-            "占组合%": round(ratio * 100, 1),
+            "占净资产%": round(ratio * 100, 1),
             "浮动盈亏": p.unrealized_pnl,
             "浮亏率%": round(p.unrealized_pnl_ratio * 100, 1),
             "当日涨跌%": round(p.day_pnl_ratio * 100, 2),
@@ -153,11 +171,11 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
             if age < timedelta(seconds=CACHE_TTL_SECONDS):
                 return _batch_to_response(rows, cache_hit=True)
 
-    # 计算总市值（HKD）
-    total_mv_hkd = sum(
-        p.market_value if p.currency == "HKD" else abs(p.market_value) * USD_TO_HKD_FALLBACK
-        for p in positions
-    )
+    # 占比分母 = 净资产（含现金），跟 briefing / portfolio_analysis 统一口径
+    pct_denom_hkd = float(account.net_assets or 0)
+    if pct_denom_hkd <= 0:
+        # 兜底：账户没快照时用持仓总市值
+        pct_denom_hkd = sum(fx_service.to_hkd(abs(p.market_value), p.currency, db) for p in positions)
 
     # 抓市场背景 + 重仓股新闻（前 6 大）
     sorted_pos = sorted(positions, key=lambda p: abs(p.market_value), reverse=True)
@@ -170,7 +188,7 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
             for p in news_targets
         }
 
-    enriched_positions = _enrich_positions(positions, total_mv_hkd)
+    enriched_positions = _enrich_positions(positions, pct_denom_hkd, db)
 
     # 已识别的账户问题（喂给 LLM 作为强提示）
     known_issues = _identify_issues(account, enriched_positions)
@@ -335,7 +353,8 @@ def _identify_issues(account, positions: list[dict]) -> list[str]:
     issues = []
     debt = account.outstanding_debt or 0
     if debt < 0:
-        debt_usd = abs(debt) / USD_TO_HKD_FALLBACK
+        usd_hkd = fx_service.usd_to_hkd()
+        debt_usd = abs(debt) / usd_hkd
         issues.append(
             f"USD 账户透支 ${debt_usd:.0f}（HK${abs(debt):.0f}），融资利率 5-6%，每年息差损失 ~${debt_usd*0.05:.0f}"
         )
@@ -345,8 +364,8 @@ def _identify_issues(account, positions: list[dict]) -> list[str]:
             issues.append(
                 f"{p['symbol']} 是 2x 杠杆 ETF 且浮亏 {p['浮亏率%']}%，有 volatility decay，长持会持续掉价"
             )
-        if not p["是否杠杆ETF"] and not p["是否期权"] and p["占组合%"] > 20:
-            issues.append(f"{p['symbol']} 占组合 {p['占组合%']}%，单股集中度过高（>20%）")
+        if not p["是否杠杆ETF"] and not p["是否期权"] and p["占净资产%"] > 20:
+            issues.append(f"{p['symbol']} 占净资产 {p['占净资产%']}%，单股集中度过高（>20%）")
         if p["浮亏率%"] < -25 and abs(p["市值"]) < 5000:  # 小仓位大亏，鸡肋
             issues.append(f"{p['symbol']} 浮亏 {p['浮亏率%']}%，仓位小但情绪占用大")
 
@@ -531,10 +550,8 @@ def _check_affordability(
 
         # 估算成本（HKD）
         cost_native = qty * price
-        if sym.endswith(".US"):
-            cost_hkd = cost_native * USD_TO_HKD_FALLBACK
-        else:
-            cost_hkd = cost_native  # 港股 / 其他用本币当 HKD 近似
+        currency = "USD" if sym.endswith(".US") else "HKD"
+        cost_hkd = fx_service.to_hkd(cost_native, currency)
 
         if buy_power_hkd <= 0:
             continue

@@ -20,6 +20,8 @@ from openai import OpenAI
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services import fx as fx_service
+from app.services.account import get_latest_account
 from app.services.positions import list_positions
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ _BRIEFING_CACHE: dict[str, tuple[dict, float]] = {}
 CACHE_TTL_SECONDS = 20 * 60  # 20 min，足够避免重复烧钱又能反映新行情
 
 HEAVY_TOP_N = 5
-HEAVY_MIN_RATIO = 0.03  # 至少占总市值 3% 才算重仓
+HEAVY_MIN_RATIO = 0.03  # 至少占净资产 3% 才算重仓
 
 NEWS_PER_STOCK = 4
 
@@ -79,19 +81,32 @@ def _to_yahoo_symbol(symbol: str) -> str:
 
 
 def select_heavy_positions(db: Session) -> list[dict]:
-    """Top N + ≥3% 双门槛，排除期权（symbol > 8 字符的视为期权）。"""
+    """Top N + ≥3% 双门槛，排除期权（symbol > 8 字符的视为期权）。
+
+    ratio 口径 = 单仓 HKD 市值 / 账户净资产（HKD）。账户快照缺失时回退到
+    `单仓 / 持仓总市值`，保证空数据库也能跑。
+    """
     positions = list_positions(db)
     stocks = [p for p in positions if len(p.symbol) <= 8 and p.market_value != 0]
     if not stocks:
         return []
-    total_mv = sum(abs(p.market_value) for p in stocks)
-    if total_mv <= 0:
+
+    account = get_latest_account(db)
+
+    def mv_hkd(p) -> float:
+        return fx_service.to_hkd(abs(p.market_value), p.currency, db)
+
+    denom = float(account.net_assets) if account and account.net_assets > 0 else 0.0
+    if denom <= 0:
+        denom = sum(mv_hkd(p) for p in stocks)
+    if denom <= 0:
         return []
-    stocks.sort(key=lambda p: abs(p.market_value), reverse=True)
+
+    stocks.sort(key=mv_hkd, reverse=True)
 
     heavy = []
     for p in stocks[:HEAVY_TOP_N]:
-        ratio = abs(p.market_value) / total_mv
+        ratio = mv_hkd(p) / denom
         if ratio < HEAVY_MIN_RATIO:
             continue
         heavy.append({
@@ -279,7 +294,7 @@ def _build_user_payload(heavy: list[dict], market_ctx: dict) -> str:
             {
                 "symbol": p["symbol"],
                 "名称": p["name"],
-                "市值占比": f"{p['ratio'] * 100:.1f}%",
+                "净资产占比": f"{p['ratio'] * 100:.1f}%",
                 "浮动盈亏率": f"{p['unrealized_pnl_ratio'] * 100:.1f}%",
                 "当日涨跌": f"{p['day_pnl_ratio'] * 100:.2f}%",
                 "成本价": p["cost_price"],
