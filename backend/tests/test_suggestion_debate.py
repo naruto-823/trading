@@ -1,5 +1,8 @@
+from unittest.mock import patch
+
 import pytest
 
+from app.services import suggestion_debate
 from app.services.suggestion_debate import (
     apply_debate,
     classify_consistency,
@@ -107,3 +110,60 @@ def test_apply_debate_mixed_downgrades_urgency():
     apply_debate(sug, v)
     assert sug["urgency"] == "low"
     assert sug["debate"]["consistency"] == "mixed"
+
+
+def _bull_verdict():
+    return _verdict(direction="bullish", winning_side="bull", confidence=70)
+
+
+def test_debate_batch_applies_to_each_suggestion():
+    sugs = [
+        {"action": "buy", "symbol": "GOOG.US", "urgency": "high", "thesis": "t1"},
+        {"action": "sell", "symbol": "INTW.US", "urgency": "high", "thesis": "t2"},
+    ]
+    with patch.object(suggestion_debate, "run_debate", return_value=_bull_verdict()), \
+         patch.object(suggestion_debate, "build_position_context", return_value="ctx"):
+        suggestion_debate.debate_batch(sugs)
+    assert all("debate" in s for s in sugs)
+    # GOOG buy + bullish → agree;INTW sell + bullish → contradict
+    assert sugs[0]["debate"]["consistency"] == "agree"
+    assert sugs[1]["debate"]["consistency"] == "contradict"
+
+
+def test_debate_batch_skips_option_symbols():
+    sugs = [{"action": "sell", "symbol": "MSFT260618C440000.US", "urgency": "high", "thesis": "t"}]
+    with patch.object(suggestion_debate, "run_debate") as mock_run, \
+         patch.object(suggestion_debate, "build_position_context", return_value="ctx"):
+        suggestion_debate.debate_batch(sugs)
+    mock_run.assert_not_called()
+    assert "debate" not in sugs[0]
+
+
+def test_debate_batch_dedups_same_symbol():
+    sugs = [
+        {"action": "buy", "symbol": "AAPL.US", "urgency": "high", "thesis": "t1"},
+        {"action": "sell", "symbol": "AAPL.US", "urgency": "high", "thesis": "t2"},
+    ]
+    with patch.object(suggestion_debate, "run_debate", return_value=_bull_verdict()) as mock_run, \
+         patch.object(suggestion_debate, "build_position_context", return_value="ctx"):
+        suggestion_debate.debate_batch(sugs)
+    assert mock_run.call_count == 1  # 同 symbol 只辩一次
+    assert all("debate" in s for s in sugs)  # 但两条建议都拿到结果
+
+
+def test_debate_batch_symbol_failure_isolated():
+    sugs = [{"action": "buy", "symbol": "GOOG.US", "urgency": "high", "thesis": "t"}]
+    with patch.object(suggestion_debate, "run_debate", side_effect=RuntimeError("boom")), \
+         patch.object(suggestion_debate, "build_position_context", return_value="ctx"):
+        suggestion_debate.debate_batch(sugs)  # 不抛异常
+    assert "debate" not in sugs[0]  # 失败 → 该建议无标注
+    assert sugs[0]["urgency"] == "high"  # urgency 不变
+
+
+def test_debate_batch_disabled_noop():
+    sugs = [{"action": "buy", "symbol": "GOOG.US", "urgency": "high", "thesis": "t"}]
+    with patch.object(suggestion_debate.settings, "debate_enabled", False), \
+         patch.object(suggestion_debate, "run_debate") as mock_run:
+        suggestion_debate.debate_batch(sugs)
+    mock_run.assert_not_called()
+    assert "debate" not in sugs[0]
