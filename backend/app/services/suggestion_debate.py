@@ -67,3 +67,25 @@ def debate_annotation(consistency: str, action: str, verdict: dict) -> str:
         )
     # mixed
     return f"⚖️ 辩论复核:多空僵持/存疑 — {judge}"
+
+
+def apply_debate(suggestion: dict, verdict: dict) -> None:
+    """把一个 verdict 应用到一条建议(in-place):
+    分类一致性 → contradict/mixed 时降 urgency → 追加 thesis 行 → 写 debate 字段。
+    """
+    action = suggestion.get("action", "")
+    consistency = classify_consistency(action, verdict)
+    if consistency in ("contradict", "mixed"):
+        suggestion["urgency"] = downgrade_urgency(suggestion.get("urgency", "medium"))
+    annotation = debate_annotation(consistency, action, verdict)
+    base_thesis = suggestion.get("thesis", "")
+    suggestion["thesis"] = f"{base_thesis}\n{annotation}" if base_thesis else annotation
+    suggestion["debate"] = {
+        "direction": verdict.get("direction", "neutral"),
+        "winning_side": verdict.get("winning_side", "balanced"),
+        "confidence": verdict.get("confidence", 0),
+        "consistency": consistency,
+        "bull_case": verdict.get("bull_case", ""),
+        "bear_case": verdict.get("bear_case", ""),
+        "judge_reasoning": verdict.get("judge_reasoning", ""),
+    }

@@ -1,6 +1,7 @@
 import pytest
 
 from app.services.suggestion_debate import (
+    apply_debate,
     classify_consistency,
     debate_annotation,
     downgrade_urgency,
@@ -77,3 +78,32 @@ def test_debate_annotation_mixed():
     v = _verdict(judge_reasoning="多空僵持")
     ann = debate_annotation("mixed", "buy", v)
     assert "存疑" in ann or "僵持" in ann
+
+
+def test_apply_debate_agree_keeps_urgency():
+    sug = {"action": "buy", "symbol": "GOOG.US", "urgency": "high", "thesis": "原始论点"}
+    v = _verdict(direction="bullish", winning_side="bull", confidence=70)
+    apply_debate(sug, v)
+    assert sug["urgency"] == "high"  # agree 不降档
+    assert "原始论点" in sug["thesis"]
+    assert "辩论复核" in sug["thesis"]
+    assert sug["debate"]["consistency"] == "agree"
+    assert sug["debate"]["winning_side"] == "bull"
+
+
+def test_apply_debate_contradict_downgrades_urgency():
+    sug = {"action": "sell", "symbol": "INTW.US", "urgency": "high", "thesis": "卖出止损"}
+    v = _verdict(direction="bullish", winning_side="bull", bull_case="正在反弹")
+    apply_debate(sug, v)
+    assert sug["urgency"] == "medium"  # contradict 降一档
+    assert "卖出止损" in sug["thesis"]
+    assert "相左" in sug["thesis"]
+    assert sug["debate"]["consistency"] == "contradict"
+
+
+def test_apply_debate_mixed_downgrades_urgency():
+    sug = {"action": "buy", "symbol": "MSFT.US", "urgency": "medium", "thesis": "买入"}
+    v = _verdict(winning_side="balanced")
+    apply_debate(sug, v)
+    assert sug["urgency"] == "low"
+    assert sug["debate"]["consistency"] == "mixed"
