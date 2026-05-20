@@ -31,3 +31,45 @@ def _verdict(**over):
 ])
 def test_classify_consistency(action, verdict, expected):
     assert classify_consistency(action, verdict) == expected
+
+
+from app.services.suggestion_debate import debate_annotation, downgrade_urgency
+
+
+@pytest.mark.parametrize("urgency, expected", [
+    ("high", "medium"),
+    ("medium", "low"),
+    ("low", "low"),
+], ids=["high-down", "medium-down", "low-stays"])
+def test_downgrade_urgency(urgency, expected):
+    assert downgrade_urgency(urgency) == expected
+
+
+def test_debate_annotation_agree():
+    v = _verdict(winning_side="bull", confidence=70, judge_reasoning="多方证据扎实")
+    ann = debate_annotation("agree", "buy", v)
+    assert "辩论复核" in ann
+    assert "同向" in ann
+    assert "70%" in ann
+
+
+def test_debate_annotation_contradict_sell_quotes_bull_case():
+    # 卖建议被判看涨 → 引 bull_case
+    v = _verdict(direction="bullish", bull_case="板块反弹强劲", bear_case="2x decay")
+    ann = debate_annotation("contradict", "sell", v)
+    assert "相左" in ann
+    assert "板块反弹强劲" in ann
+    assert "两可" in ann
+
+
+def test_debate_annotation_contradict_buy_quotes_bear_case():
+    # 买建议被判看跌 → 引 bear_case
+    v = _verdict(direction="bearish", bull_case="估值低", bear_case="需求转弱")
+    ann = debate_annotation("contradict", "buy", v)
+    assert "需求转弱" in ann
+
+
+def test_debate_annotation_mixed():
+    v = _verdict(judge_reasoning="多空僵持")
+    ann = debate_annotation("mixed", "buy", v)
+    assert "存疑" in ann or "僵持" in ann

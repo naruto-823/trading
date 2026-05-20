@@ -34,3 +34,36 @@ def classify_consistency(action: str, verdict: dict) -> str:
     else:
         return "mixed"  # 未知动作
     return "agree" if direction == implied else "contradict"
+
+
+_URGENCY_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def downgrade_urgency(urgency: str) -> str:
+    """urgency 降一档(high→medium→low,low 保持)。未知值兜底为 low。"""
+    return _URGENCY_DOWNGRADE.get(urgency, "low")
+
+
+_DIR_CN = {"bullish": "涨", "bearish": "跌", "neutral": "平"}
+
+
+def debate_annotation(consistency: str, action: str, verdict: dict) -> str:
+    """生成追加到 thesis 末尾的辩论复核行。"""
+    conf = verdict.get("confidence", 0)
+    judge = (verdict.get("judge_reasoning") or "")[:120]
+    if consistency == "agree":
+        side = verdict.get("winning_side", "")
+        return f"⚖️ 辩论复核:判官同向({side},判官 {conf}%)— {judge}"
+    if consistency == "contradict":
+        dir_cn = _DIR_CN.get(verdict.get("direction"), "平")
+        # 引与建议动作相反那一方的 case:卖建议被判看涨→bull_case;买建议被判看跌→bear_case
+        if action in _BEARISH_ACTIONS:
+            opp_case = verdict.get("bull_case") or ""
+        else:
+            opp_case = verdict.get("bear_case") or ""
+        return (
+            f"⚖️ 辩论复核:判官倾向看{dir_cn},与本动作相左 —— "
+            f"{opp_case[:120]}。两可,你来定。"
+        )
+    # mixed
+    return f"⚖️ 辩论复核:多空僵持/存疑 — {judge}"
