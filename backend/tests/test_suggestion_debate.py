@@ -1,6 +1,10 @@
 import pytest
 
-from app.services.suggestion_debate import classify_consistency
+from app.services.suggestion_debate import (
+    classify_consistency,
+    debate_annotation,
+    downgrade_urgency,
+)
 
 
 def _verdict(**over):
@@ -33,14 +37,12 @@ def test_classify_consistency(action, verdict, expected):
     assert classify_consistency(action, verdict) == expected
 
 
-from app.services.suggestion_debate import debate_annotation, downgrade_urgency
-
-
 @pytest.mark.parametrize("urgency, expected", [
     ("high", "medium"),
     ("medium", "low"),
     ("low", "low"),
-], ids=["high-down", "medium-down", "low-stays"])
+    ("critical", "low"),
+], ids=["high-down", "medium-down", "low-stays", "unknown-fallback"])
 def test_downgrade_urgency(urgency, expected):
     assert downgrade_urgency(urgency) == expected
 
@@ -67,6 +69,8 @@ def test_debate_annotation_contradict_buy_quotes_bear_case():
     v = _verdict(direction="bearish", bull_case="估值低", bear_case="需求转弱")
     ann = debate_annotation("contradict", "buy", v)
     assert "需求转弱" in ann
+    assert "相左" in ann
+    assert "两可" in ann
 
 
 def test_debate_annotation_mixed():
