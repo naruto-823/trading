@@ -17,7 +17,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from anthropic import Anthropic
 
 from app.config import settings
+from app.db import SessionLocal
 from app.services.debate_research import gather_research
+from app.services.positions import list_positions
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +272,42 @@ def run_debate(content: str, triage: dict, position_ctx: str) -> dict:
     except Exception as exc:
         logger.warning("debate verdict normalize failed: %s", exc)
         return _verdict_from_triage(triage, "结果归一化失败")
+
+
+# —————————————————— 持仓上下文 ——————————————————
+
+def build_position_context(affected_tickers: list[str]) -> str:
+    """给辩论用的持仓上下文:全部重仓概览 + 受影响标的的成本/盈亏明细。
+
+    比 triage 的持仓上下文更丰富 —— 让辩手能像人一样推理(如"已接近回本")。
+    """
+    affected = {t.upper() for t in (affected_tickers or [])}
+    db = SessionLocal()
+    try:
+        positions = list_positions(db)
+        stocks = sorted(
+            [p for p in positions if len(p.symbol) <= 8 and abs(p.market_value) > 0],
+            key=lambda p: abs(p.market_value),
+            reverse=True,
+        )[:10]
+        if not stocks:
+            return "用户当前无持仓"
+
+        overview = "用户重仓(按市值倒序): " + ", ".join(
+            f"{p.symbol}({p.name})" for p in stocks
+        )
+
+        detail_lines = []
+        for p in stocks:
+            base = p.symbol.split(".")[0].upper()
+            if base in affected or p.symbol.upper() in affected:
+                pnl_pct = round(p.unrealized_pnl_ratio * 100, 1)
+                detail_lines.append(
+                    f"  {p.symbol}: {p.quantity}股 成本{p.cost_price} "
+                    f"现价{p.current_price} 盈亏{pnl_pct}%"
+                )
+        if detail_lines:
+            return overview + "\n受影响标的明细:\n" + "\n".join(detail_lines)
+        return overview
+    finally:
+        db.close()

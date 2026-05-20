@@ -159,3 +159,38 @@ def test_run_debate_one_advocate_fails_still_judges():
         verdict = debate_scorer.run_debate("x", _TRIAGE, "ctx")
     assert verdict["model"] == "debate"
     assert verdict["score"] == 72
+
+
+from datetime import datetime
+
+from app.models.position import Position
+
+
+def _pos(symbol, name, qty, cost, cur, mv, pnl, ratio):
+    return Position(
+        synced_at=datetime.utcnow(), symbol=symbol, market="US", name=name,
+        quantity=qty, available_qty=qty, cost_price=cost, current_price=cur,
+        market_value=mv, unrealized_pnl=pnl, unrealized_pnl_ratio=ratio,
+        currency="USD",
+    )
+
+
+def test_build_position_context_includes_affected_detail(db_session):
+    db_session.add(_pos("MSFT", "Microsoft", 90, 417.2, 415.4, 37386, -163, -0.004))
+    db_session.add(_pos("INTW", "GraniteShares 2x INTC", 16, 361.0, 302.0, 4832, -944, -0.163))
+    db_session.commit()
+
+    with patch.object(debate_scorer, "SessionLocal", return_value=db_session):
+        ctx = debate_scorer.build_position_context(["INTW"])
+
+    # 总览含全部重仓
+    assert "MSFT" in ctx and "INTW" in ctx
+    # 受影响标的带成本/盈亏明细
+    assert "361" in ctx  # INTW 成本
+    assert "-16" in ctx  # INTW 盈亏%
+
+
+def test_build_position_context_no_positions(db_session):
+    with patch.object(debate_scorer, "SessionLocal", return_value=db_session):
+        ctx = debate_scorer.build_position_context([])
+    assert "无持仓" in ctx
