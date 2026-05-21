@@ -111,8 +111,8 @@ def _is_option(symbol: str) -> bool:
 def _synth_inputs(symbol: str) -> tuple[str, dict]:
     """合成喂给 run_debate 的中性 content + triage(不喂建议动作,要独立第二意见)。"""
     content = (
-        f"复核:此刻应该看多还是看空 {symbol}?"
-        f"结合该标的近况与用户持仓给方向判断。"
+        f"持仓复核请求:对用户持仓标的 {symbol} 做一次独立的多空方向评估 —— "
+        f"结合该标的近况与下方持仓信息,判断此刻应看多还是看空 {symbol}。"
     )
     triage = {
         "relevance": "direct", "score": 60, "sentiment": "neutral",

@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     debate_websearch_enabled: bool = True
     debate_websearch_max_uses: int = 3
     debate_daily_cap: int = 0  # 0=不限;>0 时超额当天降级走 triage
+    # 辩论 LLM 客户端重试次数 —— 中转代理突发限流(429)时退避重试。
+    # SDK 默认 2 次扛不住;辩论是后台流程,可多retry trickle 着过。
+    debate_api_max_retries: int = 6
 
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"

@@ -29,6 +29,7 @@ def gather_research(content: str, tickers: list[str]) -> str:
             api_key=settings.anthropic_api_key,
             base_url=settings.anthropic_base_url or None,
             timeout=45.0,
+            max_retries=settings.debate_api_max_retries,
         )
         resp = client.messages.create(
             model=settings.debate_bull_model,  # 用 Haiku 跑研究
