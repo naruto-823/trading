@@ -102,6 +102,11 @@ SYSTEM_PROMPT = """你是用户的**进攻型交易策略师**，不是风险经
 6. urgency: high（本周）、medium（本月）、low（中长期）
 7. 涉及融资透支时，可以建议"用 X 的卖出资金还透支"，但**别让"还透支"占走超过 1 条建议**
 8. **不要在思路里出现具体 ticker example 来源于本 prompt**——所有推荐标的必须来自：用户持仓 / 输入新闻提及的 symbol / 输入市场背景的 ETF 代码
+9. **期权 income 策略可行性硬约束**（1 张美式期权合约 = 100 股正股）：
+   - covered call 只能在该正股持仓 **≥100 股** 时建议；合约数 = 持仓股数 ÷ 100（向下取整）。
+     **正股不足 100 股、或根本没持有的标的，禁止建议 covered call**
+   - 现金担保 put 必须有 ≥ 行权价 × 100 × 合约数 的现金 / 购买力，否则别建议
+   - 写 1 张合约 qty 写 "-1"（对应 100 股正股）
 
 【仓位口径】
 - 输入字段 `占净资产%` 是该仓位 HKD 市值 ÷ 账户净资产（含现金）。集中度判断以此为准（>20% 算单一过重，>50% 算前 3 集中）
@@ -208,6 +213,13 @@ def build_suggestions(db: Session, force_refresh: bool = False) -> dict:
         result.get("suggestions", []),
         buy_power_hkd=account.buy_power or 0,
         held_positions=enriched_positions,
+    )
+
+    # 期权可行性护栏:抑制底层不足 100 股的 covered call、标记资金不足的现金担保 put
+    _check_option_feasibility(
+        result.get("suggestions", []),
+        held_positions=enriched_positions,
+        buy_power_hkd=account.buy_power or 0,
     )
 
     # 辩论复核(Phase 2):对每条建议跑看多/看空辩论,矛盾→标注+降 urgency。
@@ -582,6 +594,76 @@ def _check_affordability(
             "buy_power_hkd": round(buy_power_hkd, 0),
             "ratio_pct": round(ratio * 100, 0),
         }
+
+
+def _parse_option_symbol(symbol: str) -> dict | None:
+    """解析期权合约 symbol(如 MSFT260627C430000.US)→
+    {underlying, type: "call"|"put", strike}。解析不了返回 None。
+    格式:{TICKER}{YYMMDD}{C|P}{行权价×1000}.{MKT}
+    """
+    m = re.match(r"^([A-Z]+)(\d{6})([CP])(\d+)(\.[A-Z]+)$", symbol.strip().upper())
+    if not m:
+        return None
+    ticker, _expiry, cp, strike_raw, suffix = m.groups()
+    return {
+        "underlying": f"{ticker}{suffix}",
+        "type": "call" if cp == "C" else "put",
+        "strike": int(strike_raw) / 1000.0,
+    }
+
+
+def _check_option_feasibility(
+    suggestions: list[dict],
+    held_positions: list[dict],
+    buy_power_hkd: float,
+) -> None:
+    """期权 income 策略可行性护栏(原地修改 suggestions)。
+
+    1 张美式期权合约 = 100 股正股。
+    - 写 call(covered call):底层正股不足 合约数×100 股 → 不是 covered call,直接剔除。
+    - 写 put(现金担保 put):购买力不足 行权价×100×合约数 → data_points 插红色警告(不剔除)。
+    解析不了的 / 非「写期权」建议一律放行。
+    """
+    held = {p["symbol"]: p for p in held_positions}
+    kept: list[dict] = []
+    for s in suggestions:
+        sym = s.get("symbol", "")
+        qty_str = str(s.get("qty", ""))
+        # 只查「写期权」:期权合约 symbol + qty 为负(-1 = 卖出开仓 1 张)
+        if not (_is_option(sym) and "-" in qty_str):
+            kept.append(s)
+            continue
+        parsed = _parse_option_symbol(sym)
+        contracts = _extract_first_number(qty_str)
+        if parsed is None or not contracts:
+            kept.append(s)  # 解析不了 → 不拦,放行
+            continue
+        contracts = int(contracts)
+
+        if parsed["type"] == "call":
+            pos = held.get(parsed["underlying"])
+            shares = abs(pos["数量"]) if pos else 0
+            need = contracts * 100
+            if shares < need:
+                logger.warning(
+                    "option-feasibility 抑制 covered call %s:底层 %s 仅 %d 股 < 需 %d 股",
+                    sym, parsed["underlying"], shares, need,
+                )
+                continue  # 剔除该建议 —— 不足 100 股写不了 covered call
+        else:  # put —— 现金担保校验
+            currency = "USD" if sym.endswith(".US") else "HKD"
+            need_cash_hkd = fx_service.to_hkd(
+                parsed["strike"] * 100 * contracts, currency
+            )
+            if buy_power_hkd > 0 and need_cash_hkd > buy_power_hkd:
+                warn = (
+                    f"⚠️ 现金担保 put 资金不足:需 HK${need_cash_hkd:,.0f}"
+                    f"(行权价 {parsed['strike']:g}×100×{contracts}),"
+                    f"购买力仅 HK${buy_power_hkd:,.0f}"
+                )
+                s["data_points"] = [warn] + list(s.get("data_points", []))
+        kept.append(s)
+    suggestions[:] = kept
 
 
 def _empty_response(reason: str) -> dict:
