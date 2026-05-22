@@ -27,6 +27,9 @@ class AccountSnapshot(Base):
     # 实际融资欠款（HKD）：把所有币种 cash_infos.available < 0 的部分折成 HKD 求和
     # 这是长桥 app "融资欠款" 那一栏的口径，与 max-remaining 不同。
     outstanding_debt: Mapped[float] = mapped_column(Float, default=0.0)
+    # 未配发的 IPO 申购占款（HKD）。account_balance 不含这笔（申购款已离开 total_cash、
+    # 新股未上市又不在 positions），前端把它加回净资产/现金以对齐长桥 app。
+    pending_ipo: Mapped[float] = mapped_column(Float, default=0.0)
     init_margin: Mapped[float] = mapped_column(Float, default=0.0)
     maintenance_margin: Mapped[float] = mapped_column(Float, default=0.0)
     buy_power: Mapped[float] = mapped_column(Float, default=0.0)

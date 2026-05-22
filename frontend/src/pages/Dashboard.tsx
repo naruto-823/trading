@@ -165,6 +165,13 @@ export default function Dashboard() {
     return hkd;
   };
 
+  // 长桥 account_balance 不含 IPO 申购冻结的钱：申购款已离开 total_cash，
+  // 新股配发上市前也不在持仓里 —— 这笔钱会从净资产/现金整笔消失。
+  // 后端从 cash_flow 还原出未配发申购占款（pending_ipo），这里加回，与长桥 APP 口径一致。
+  const pendingIpo = account?.pending_ipo ?? 0;
+  const totalAssets = (account?.net_assets ?? 0) + pendingIpo;
+  const displayCash = (account?.total_cash ?? 0) + pendingIpo;
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -242,12 +249,12 @@ export default function Dashboard() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-sm font-medium">净资产</CardTitle>
+              <CardTitle className="text-sm font-medium">总资产</CardTitle>
               <Wallet className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {formatCurrency(fromHkd(account.net_assets), displayCurrency)}
+                {formatCurrency(fromHkd(totalAssets), displayCurrency)}
               </div>
             </CardContent>
           </Card>
@@ -271,7 +278,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">
-                {formatCurrency(fromHkd(account.total_cash), displayCurrency)}
+                {formatCurrency(fromHkd(displayCash), displayCurrency)}
               </div>
             </CardContent>
           </Card>
@@ -309,8 +316,8 @@ export default function Dashboard() {
           {(() => {
             const debt = account.outstanding_debt ?? 0;
             const hasDebt = debt < 0;
-            const debtPctOfNet = hasDebt && account.net_assets > 0
-              ? (Math.abs(debt) / account.net_assets) * 100
+            const debtPctOfTotal = hasDebt && totalAssets > 0
+              ? (Math.abs(debt) / totalAssets) * 100
               : 0;
             return (
               <Card>
@@ -323,7 +330,7 @@ export default function Dashboard() {
                     {formatCurrency(fromHkd(debt), displayCurrency)}
                   </div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {hasDebt ? `占净资产 ${debtPctOfNet.toFixed(1)}%` : "未使用融资"}
+                    {hasDebt ? `占总资产 ${debtPctOfTotal.toFixed(1)}%` : "未使用融资"}
                   </p>
                 </CardContent>
               </Card>

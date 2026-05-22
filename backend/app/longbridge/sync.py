@@ -4,7 +4,7 @@ import json
 import logging
 import traceback
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -84,6 +84,47 @@ def _is_option_symbol(symbol: str) -> bool:
     ticker = parts[0]
     # 期权标的通常包含日期+P/C+行权价的模式，长度较长
     return len(ticker) > 10 and any(c in ticker for c in "PC") and any(c.isdigit() for c in ticker[-6:])
+
+def _sdk_dt_to_utc(dt: datetime | None) -> datetime | None:
+    """把 longport SDK 的成交/订单时间统一成 naive UTC，供入库使用。
+
+    SDK 的 trade_done_at / submitted_at / updated_at 是【机器本地时区的 naive
+    datetime】（Rust 核心持 UTC，Python 属性渲染成本地墙上时间且丢掉 tzinfo）。
+    而本应用其它地方——today 过滤、当日盈亏——一律把这些字段当 UTC 用。
+    若直接入库，UTC+8 机器上每条时间都 +8h，会把昨天美股盘的成交误判成"今日平仓"。
+
+    naive → 按系统本地时区补全再转 UTC；已带 tzinfo 的也一并归一化。
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # 视作系统本地时区
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _option_valuation(qty: int, cost: float, current: float, multiplier: int = 100) -> tuple[float, float, float]:
+    """期权持仓估值 → (市值, 浮动盈亏, 盈亏比例)。
+
+    current<=0 表示报价缺失（行情接口无权限/限流/网络失败）—— 此时无法估值，
+    市值与盈亏一律记 0，绝不拿成本价反推一个"已归零"的假盈亏：
+    早期实现会让 long 显示 -100%（权利金全损）、short 显示 +100%（白赚权利金），
+    把组合盈亏整体虚高上千刀。真到期作废的合约不会出现在券商实时持仓里，
+    所以这里的 current<=0 几乎一定是"没数据"而非"已作废"。
+    """
+    cost_val = abs(qty) * cost * multiplier
+    if current > 0:
+        mkt_val = abs(qty) * current * multiplier
+        if qty < 0:
+            pnl = (cost - current) * abs(qty) * multiplier
+        else:
+            pnl = (current - cost) * abs(qty) * multiplier
+        pnl_ratio = pnl / cost_val if cost_val else 0.0
+    else:
+        mkt_val = 0.0
+        pnl = 0.0
+        pnl_ratio = 0.0
+    return mkt_val, pnl, pnl_ratio
+
 
 def _is_quote_from_today(quote, now_utc: datetime) -> bool:
     """判断 quote 数据是否属于今天的交易日。
@@ -193,6 +234,63 @@ def _compute_sold_today_day_pnl_by_market(
     return by_market, total_hkd
 
 
+def _pending_ipo_from_flows(flows, held_symbols: set[str], fx_rates: dict[str, float]) -> float:
+    """从 cash_flow 记录算【未配发的 IPO 申购占款】（HKD）。
+
+    长桥 account_balance 既不含 IPO 申购冻结的钱（申购款已离开 total_cash），
+    新股配发上市前也不在 positions 里 —— 这笔钱会从净资产/现金里整笔消失，
+    导致与长桥 APP 对不上账（实例：2723.HK 申购占款 HK$280,298.59）。
+
+    口径：按 IPO 标的归集 cash_flow 金额（申购支出/手续费为负、退款/融资回收为正）。
+    某标的【未了结】（无 Refund/Recovery/Allotted 流水）、净额仍为负、且未进持仓
+    → 该负额即真实占款。已了结的 IPO 即便残留 -99 手续费也不算占款（钱是花掉的）。
+    """
+    by_symbol: dict[str, float] = {}
+    by_symbol_ccy: dict[str, str] = {}
+    resolved: set[str] = set()  # 有退款/融资回收/配发流水 = 已了结
+    for f in flows:
+        desc = str(getattr(f, "description", "") or "")
+        if not desc.startswith("IPO "):
+            continue
+        parts = desc.split()
+        if len(parts) < 2:
+            continue
+        symbol = parts[1].upper()
+        amount = float(getattr(f, "balance", 0) or 0)
+        by_symbol[symbol] = by_symbol.get(symbol, 0.0) + amount
+        by_symbol_ccy[symbol] = str(getattr(f, "currency", "HKD") or "HKD")
+        if any(marker in desc for marker in ("Refund", "Recovery", "Allotted")):
+            resolved.add(symbol)
+
+    total_hkd = 0.0
+    for symbol, net in by_symbol.items():
+        if net >= 0 or symbol in held_symbols or symbol in resolved:
+            continue  # 净额≥0 / 已配发进持仓 / 已了结 → 不算占款
+        occupied = -net
+        if by_symbol_ccy.get(symbol, "HKD").upper() == "USD":
+            total_hkd += occupied * fx_rates.get("USD_HKD", 7.83)
+        else:
+            total_hkd += occupied
+    return total_hkd
+
+
+def _compute_pending_ipo_hkd(db: Session, fx_rates: dict[str, float]) -> float:
+    """读 cash_flow 算未配发 IPO 申购占款（HKD）。失败返回 0，不阻断账户同步。"""
+    from datetime import timedelta
+    try:
+        from app.longbridge.client import get_trade_context
+        ctx = get_trade_context()
+        now = datetime.utcnow()
+        # 近 45 天足够覆盖未配发的打新（港股 IPO 一般 1-3 周内上市配发）；
+        # 更早的申购要么已配发进持仓、要么已退款，不会漏算也不会误算。
+        flows = ctx.cash_flow(start_at=now - timedelta(days=45), end_at=now)
+        held = {str(p.symbol).upper() for p in db.query(Position).all()}
+        return _pending_ipo_from_flows(flows, held, fx_rates)
+    except Exception as exc:
+        logger.warning("compute pending IPO failed: %s", exc)
+        return 0.0
+
+
 def _start_sync_log(db: Session, kind: str) -> SyncLog:
     log = SyncLog(kind=kind, started_at=datetime.utcnow(), status="running")
     db.add(log)
@@ -274,6 +372,9 @@ def sync_account(db: Session) -> SyncLog:
                 )
                 day_pnl_val = unrealized_day_pnl_hkd + realized_day_pnl_hkd
 
+                # 未配发的 IPO 申购占款（HKD）—— account_balance 不含这笔，前端加回净资产/现金
+                pending_ipo_hkd = _compute_pending_ipo_hkd(db, fx_rates)
+
                 # 融资 / 保证金信息（长桥已按实时汇率换算成账户主币种 HKD）
                 def _safe_dec(obj, attr: str) -> float:
                     v = getattr(obj, attr, None)
@@ -318,6 +419,7 @@ def sync_account(db: Session) -> SyncLog:
                     max_finance_amount=_safe_dec(balance, "max_finance_amount"),
                     remaining_finance_amount=_safe_dec(balance, "remaining_finance_amount"),
                     outstanding_debt=float(outstanding_debt_hkd),
+                    pending_ipo=float(pending_ipo_hkd),
                     init_margin=_safe_dec(balance, "init_margin"),
                     maintenance_margin=_safe_dec(balance, "maintenance_margin"),
                     buy_power=_safe_dec(balance, "buy_power"),
@@ -526,22 +628,7 @@ def sync_positions(db: Session) -> SyncLog:
 
                 if is_option:
                     multiplier = 100
-                    if current:
-                        mkt_val = abs(qty) * current * multiplier
-                        cost_val = abs(qty) * cost * multiplier
-                        if qty < 0:
-                            pnl = (cost - current) * abs(qty) * multiplier
-                        else:
-                            pnl = (current - cost) * abs(qty) * multiplier
-                    else:
-                        cost_val = abs(qty) * cost * multiplier
-                        if qty < 0:
-                            mkt_val = 0.0
-                            pnl = cost_val
-                        else:
-                            mkt_val = 0.0
-                            pnl = -cost_val
-                    pnl_ratio = pnl / cost_val if cost_val else 0.0
+                    mkt_val, pnl, pnl_ratio = _option_valuation(qty, cost, current, multiplier)
 
                     # 期权当日盈亏：只在美股 regular 时段算，其他时段（pre/post/overnight/closed）
                     # 期权流动性差、报价噪声大，强算会让两列看着几乎相等且数字飘忽。直接归零更清楚。
@@ -721,7 +808,11 @@ def sync_executions(db: Session) -> SyncLog:
                     side=side_val,
                     price=float(exe.price) if hasattr(exe, "price") else 0.0,
                     quantity=int(exe.quantity) if hasattr(exe, "quantity") else 0,
-                    trade_done_at=exe.trade_done_at if hasattr(exe, "trade_done_at") else datetime.utcnow(),
+                    trade_done_at=(
+                        _sdk_dt_to_utc(exe.trade_done_at)
+                        if hasattr(exe, "trade_done_at")
+                        else datetime.utcnow()
+                    ),
                     currency=currency_val,
                     commission=0.0,
                     platform_fee=0.0,
@@ -820,7 +911,9 @@ def sync_orders(db: Session) -> SyncLog:
                     existing.order_type = order_type_val or existing.order_type
                     existing.filled_qty = filled
                     existing.avg_price = avg
-                    existing.updated_at = ord.updated_at if hasattr(ord, "updated_at") else datetime.utcnow()
+                    existing.updated_at = (
+                        _sdk_dt_to_utc(ord.updated_at) if hasattr(ord, "updated_at") else datetime.utcnow()
+                    )
                     existing.raw_json = json.dumps(str(ord))
                 else:
                     order = Order(
@@ -833,8 +926,8 @@ def sync_orders(db: Session) -> SyncLog:
                         submitted_qty=int(ord.quantity) if hasattr(ord, "quantity") else 0,
                         filled_qty=filled,
                         avg_price=avg,
-                        submitted_at=ord.submitted_at if hasattr(ord, "submitted_at") else None,
-                        updated_at=ord.updated_at if hasattr(ord, "updated_at") else None,
+                        submitted_at=_sdk_dt_to_utc(ord.submitted_at) if hasattr(ord, "submitted_at") else None,
+                        updated_at=_sdk_dt_to_utc(ord.updated_at) if hasattr(ord, "updated_at") else None,
                         raw_json=json.dumps(str(ord)),
                     )
                     db.add(order)

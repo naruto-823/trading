@@ -51,6 +51,8 @@ export async function getAccount() {
     remaining_finance_amount: number;
     // 实际融资欠款（HKD），与长桥 app "融资欠款"字段一致（负数表示借款）
     outstanding_debt: number;
+    // 未配发的 IPO 申购占款（HKD）。account_balance 不含这笔，前端加回净资产/现金。
+    pending_ipo: number;
     init_margin: number;
     maintenance_margin: number;
     buy_power: number;

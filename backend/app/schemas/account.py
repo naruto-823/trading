@@ -27,6 +27,8 @@ class AccountSnapshotResponse(BaseModel):
     # 融资 / 保证金
     max_finance_amount: float = 0.0
     remaining_finance_amount: float = 0.0
+    # 未配发的 IPO 申购占款（HKD）。account_balance 不含这笔，前端加回净资产/现金。
+    pending_ipo: float = 0.0
     # 实际融资欠款（HKD）：所有币种 cash_infos.available 负数部分的合计，
     # 与长桥 app "融资欠款" 字段口径一致。负数表示借款。
     outstanding_debt: float = 0.0
