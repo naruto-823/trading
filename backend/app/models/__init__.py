@@ -6,10 +6,11 @@ from app.models.event_notification import EventNotification
 from app.models.execution import Execution
 from app.models.order import Order
 from app.models.position import Position
+from app.models.position_analysis_report import PositionAnalysisReport
 from app.models.suggestion import Suggestion
 from app.models.sync_log import SyncLog
 
 __all__ = [
     "AccountSnapshot", "Alert", "DailyBaseline", "Decision", "EventNotification",
-    "Execution", "Order", "Position", "Suggestion", "SyncLog",
+    "Execution", "Order", "Position", "PositionAnalysisReport", "Suggestion", "SyncLog",
 ]
