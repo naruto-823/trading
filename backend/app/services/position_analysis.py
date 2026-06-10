@@ -22,7 +22,6 @@ from app.models.position_analysis_report import PositionAnalysisReport
 from app.services import fx as fx_service
 from app.services.account import get_latest_account
 from app.services.briefing import HTTP_HEADERS, fetch_market_context, fetch_news_for_symbol
-from app.services.debate_research import gather_research
 from app.services.notify import send_bark
 from app.services.positions import list_positions
 
@@ -199,6 +198,49 @@ def _collect_market_data(heavy_positions: list[dict]) -> tuple[dict, dict]:
     return market_ctx, news_by_symbol
 
 
+def _gather_research_tavily(heavy_positions: list[dict]) -> str:
+    """用 Tavily 实搜每只重仓近一周新闻/催化,聚合成研究简报文本喂给体检 AI。
+
+    替代 Anthropic 托管 web_search —— 当前 AI 中转代理不支持托管工具。
+    fail-soft:未配 TAVILY_API_KEY → 返回 "";单只搜索失败只跳过该只,不影响其余。
+    """
+    if not settings.tavily_api_key:
+        return ""
+    n = settings.hourly_analysis_research_results
+    blocks: list[str] = []
+    with httpx.Client(timeout=20.0) as client:
+        for p in heavy_positions:
+            sym = p["symbol"]
+            base = sym.split(".")[0]
+            name = p.get("name") or ""
+            query = f"{base} {name} stock news catalysts analyst outlook this week".strip()
+            try:
+                resp = client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": settings.tavily_api_key,
+                        "query": query,
+                        "search_depth": "advanced",
+                        "topic": "news",
+                        "days": 7,
+                        "max_results": n,
+                    },
+                )
+                items = resp.json().get("results", []) if resp.status_code == 200 else []
+            except Exception as exc:
+                logger.warning("tavily 调研 fail-soft %s: %s", sym, exc)
+                items = []
+            if not items:
+                continue
+            lines = [f"【{sym}】"]
+            for it in items[:n]:
+                title = (it.get("title") or "").strip()
+                snippet = (it.get("content") or "").strip().replace("\n", " ")[:200]
+                lines.append(f"- {title}:{snippet}")
+            blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)[:4000]
+
+
 def generate_hourly_analysis(db: Session) -> dict:
     """每整点编排:持仓→重仓→调研→AI→落库→Bark。全程 fail-soft。"""
     generated_at = datetime.now(timezone.utc)
@@ -222,13 +264,12 @@ def generate_hourly_analysis(db: Session) -> dict:
     except Exception as exc:
         logger.warning("position-analysis 市场数据降级: %s", exc)
 
-    # web_search 调研(fail-soft;gather_research 自身永不抛,这里再兜一层)
+    # 深度调研(fail-soft):用 Tavily 实搜每只重仓近一周新闻/催化。
+    # 不走 Anthropic 托管 web_search —— 当前 AI 中转代理不支持托管工具(WebSearchToolResultError)。
     research = ""
     if settings.hourly_analysis_websearch_enabled:
         try:
-            tickers = [p["symbol"] for p in heavy]
-            content = "组合重仓体检:" + ", ".join(tickers)
-            research = gather_research(content, tickers)
+            research = _gather_research_tavily(heavy)
         except Exception as exc:
             logger.warning("position-analysis 调研降级: %s", exc)
             research = ""

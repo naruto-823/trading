@@ -98,7 +98,7 @@ def test_generate_persists_report_and_pushes_even_when_research_fails(db_session
          patch.object(pa, "get_latest_account", return_value=account), \
          patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v), \
          patch.object(pa, "_collect_market_data", side_effect=RuntimeError("news down")), \
-         patch.object(pa, "gather_research", side_effect=RuntimeError("ws down")), \
+         patch.object(pa, "_gather_research_tavily", side_effect=RuntimeError("ws down")), \
          patch.object(pa, "_call_ai", return_value=analysis), \
          patch.object(pa, "send_bark", return_value={"ok": True, "detail": "ok"}) as mock_bark:
         out = pa.generate_hourly_analysis(db_session)
@@ -132,3 +132,43 @@ def test_get_latest_report_returns_most_recent(db_session):
     db_session.commit()
     got = pa.get_latest_report(db_session)
     assert got["summary"] == "新"
+
+
+# —— Tavily 深度调研(替代死掉的 Anthropic web_search) ——
+
+def test_gather_research_tavily_no_key_returns_empty():
+    with patch.object(pa.settings, "tavily_api_key", ""):
+        assert pa._gather_research_tavily([{"symbol": "NVDA.US", "name": "Nvidia"}]) == ""
+
+
+def test_gather_research_tavily_builds_brief_from_results():
+    from unittest.mock import MagicMock
+    fake_resp = MagicMock()
+    fake_resp.status_code = 200
+    fake_resp.json.return_value = {"results": [
+        {"title": "NVDA hits new high", "content": "Strong demand for AI chips drives rally."},
+        {"title": "Analysts raise NVDA target", "content": "Price target lifted to 200."},
+    ]}
+    fake_client = MagicMock()
+    fake_client.post.return_value = fake_resp
+    fake_client.__enter__.return_value = fake_client
+    fake_client.__exit__.return_value = False
+    with patch.object(pa.settings, "tavily_api_key", "tvly-xxx"), \
+         patch.object(pa.settings, "hourly_analysis_research_results", 4), \
+         patch.object(pa.httpx, "Client", return_value=fake_client):
+        brief = pa._gather_research_tavily([{"symbol": "NVDA.US", "name": "Nvidia"}])
+    assert "【NVDA.US】" in brief
+    assert "NVDA hits new high" in brief
+    assert "AI chips" in brief
+
+
+def test_gather_research_tavily_failsoft_skips_failed_symbol():
+    from unittest.mock import MagicMock
+    fake_client = MagicMock()
+    fake_client.post.side_effect = RuntimeError("network down")
+    fake_client.__enter__.return_value = fake_client
+    fake_client.__exit__.return_value = False
+    with patch.object(pa.settings, "tavily_api_key", "tvly-xxx"), \
+         patch.object(pa.httpx, "Client", return_value=fake_client):
+        brief = pa._gather_research_tavily([{"symbol": "NVDA.US", "name": "Nvidia"}])
+    assert brief == ""  # 搜索失败 → 跳过该只,不抛
