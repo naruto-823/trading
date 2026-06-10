@@ -39,3 +39,24 @@ def test_select_heavy_fallback_to_top_n_when_none_meet_threshold():
     with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
         heavy = pa.select_heavy_positions(positions, account, db=None, top_n=2, min_pct=5.0)
     assert [p["symbol"] for p in heavy] == ["AAA.US", "BBB.US"]  # 兜底取市值前 2
+
+
+def test_parse_analysis_json_plain():
+    raw = '{"overall_stance": "持", "per_position": [], "alerts": ["a"], "summary": "s"}'
+    out = pa._parse_analysis_json(raw)
+    assert out["summary"] == "s"
+    assert out["alerts"] == ["a"]
+
+
+def test_parse_analysis_json_strips_code_fence():
+    raw = '```json\n{"summary": "x", "alerts": [], "per_position": [], "overall_stance": "攻"}\n```'
+    out = pa._parse_analysis_json(raw)
+    assert out["summary"] == "x"
+    assert out["overall_stance"] == "攻"
+
+
+def test_parse_analysis_json_invalid_returns_degraded():
+    out = pa._parse_analysis_json("not json at all")
+    assert out["degraded"] is True
+    assert "解析失败" in out["summary"]
+    assert out["per_position"] == []
