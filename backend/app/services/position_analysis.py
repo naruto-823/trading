@@ -163,3 +163,16 @@ def _degraded(reason: str) -> dict:
         "summary": f"⚠️ 本轮仓位体检降级({reason})",
         "degraded": True,
     }
+
+
+def _build_push(analysis: dict, account) -> tuple[str, str]:
+    """生成 Bark 标题 + 正文。每整点都推一条摘要。"""
+    net = float(getattr(account, "net_assets", 0) or 0)
+    day_pnl = float(getattr(account, "day_pnl", 0) or 0)
+    sign = "+" if day_pnl >= 0 else ""
+    title = f"📊 仓位体检 · 净资产HK${net:,.0f} 日{sign}{day_pnl:,.0f}"
+    lines = [analysis.get("summary", "") or "(本轮无摘要)"]
+    for a in (analysis.get("alerts") or [])[:2]:
+        lines.append(f"• {a}")
+    body = "\n".join(lines)[:600]
+    return title, body

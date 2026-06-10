@@ -71,3 +71,14 @@ def test_call_ai_fail_soft_on_exception():
         out = pa._call_ai(account, heavy, market_ctx={}, news_by_symbol={}, research="")
     assert out["degraded"] is True
     assert "降级" in out["summary"]
+
+
+def test_build_push_contains_assets_summary_and_alerts():
+    account = SimpleNamespace(net_assets=1234567.0, day_pnl=-8900.0)
+    analysis = {"summary": "整体持有,MSFT 趋势完好", "alerts": ["NVDA 财报临近", "GOOG 反垄断进展"]}
+    title, body = pa._build_push(analysis, account)
+    assert "仓位体检" in title
+    assert "1,234,567" in title          # 净资产带千分位
+    assert "整体持有" in body             # summary 进正文
+    assert "NVDA 财报临近" in body         # alert 前两条进正文
+    assert "GOOG 反垄断进展" in body
