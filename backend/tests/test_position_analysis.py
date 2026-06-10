@@ -60,3 +60,14 @@ def test_parse_analysis_json_invalid_returns_degraded():
     assert out["degraded"] is True
     assert "解析失败" in out["summary"]
     assert out["per_position"] == []
+
+
+def test_call_ai_fail_soft_on_exception():
+    account = SimpleNamespace(net_assets=1000.0, market_value=900.0,
+                             total_cash=100.0, day_pnl=5.0, buy_power=200.0)
+    heavy = [{"symbol": "AAA.US", "占净资产%": 60.0}]
+    # 让 Anthropic client 构造即抛 → 命中 except 分支
+    with patch.object(pa, "Anthropic", side_effect=RuntimeError("boom")):
+        out = pa._call_ai(account, heavy, market_ctx={}, news_by_symbol={}, research="")
+    assert out["degraded"] is True
+    assert "降级" in out["summary"]

@@ -12,7 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 
+from anthropic import Anthropic
+
+from app.config import settings
 from app.services import fx as fx_service
 
 logger = logging.getLogger(__name__)
@@ -111,3 +115,51 @@ def select_heavy_positions(positions, account, db, top_n: int, min_pct: float) -
     for d in heavy:
         d.pop("_hkd_mv", None)
     return heavy
+
+
+def _call_ai(account, heavy_positions, market_ctx, news_by_symbol, research) -> dict:
+    """调 Anthropic 原生通道出体检 JSON。fail-soft:任何异常 → degraded 降级结构。"""
+    if not settings.anthropic_api_key:
+        return _degraded("AI 未配置")
+    payload = {
+        "现在时间": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "账户概览": {
+            "净资产_HKD": getattr(account, "net_assets", None),
+            "总市值_HKD": getattr(account, "market_value", None),
+            "现金_HKD": getattr(account, "total_cash", None),
+            "当日盈亏_HKD": getattr(account, "day_pnl", None),
+            "购买力_HKD": getattr(account, "buy_power", None),
+        },
+        "重仓清单": heavy_positions,
+        "重仓近期新闻标题": {
+            sym: [n.get("title", "") for n in news] for sym, news in news_by_symbol.items()
+        },
+        "web_search研究简报": research or "(本轮无外部调研)",
+        "市场背景": market_ctx,
+    }
+    try:
+        client = Anthropic(
+            api_key=settings.anthropic_api_key,
+            base_url=settings.anthropic_base_url or None,
+        )
+        resp = client.messages.create(
+            model=settings.hourly_model(),
+            max_tokens=3000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2, default=str)}],
+        )
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text") or "{}"
+        return _parse_analysis_json(text)
+    except Exception as exc:
+        logger.error("position-analysis _call_ai 失败: %s", exc, exc_info=True)
+        return _degraded(f"AI 调用失败: {exc}")
+
+
+def _degraded(reason: str) -> dict:
+    return {
+        "overall_stance": "",
+        "per_position": [],
+        "alerts": [reason],
+        "summary": f"⚠️ 本轮仓位体检降级({reason})",
+        "degraded": True,
+    }
