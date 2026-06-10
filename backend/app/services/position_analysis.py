@@ -14,10 +14,18 @@ import logging
 import re
 from datetime import datetime
 
+import httpx
 from anthropic import Anthropic
+from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.models.position_analysis_report import PositionAnalysisReport
 from app.services import fx as fx_service
+from app.services.account import get_latest_account
+from app.services.briefing import HTTP_HEADERS, fetch_market_context, fetch_news_for_symbol
+from app.services.debate_research import gather_research
+from app.services.notify import send_bark
+from app.services.positions import list_positions
 
 logger = logging.getLogger(__name__)
 
@@ -176,3 +184,125 @@ def _build_push(analysis: dict, account) -> tuple[str, str]:
         lines.append(f"• {a}")
     body = "\n".join(lines)[:600]
     return title, body
+
+
+def _collect_market_data(heavy_positions: list[dict]) -> tuple[dict, dict]:
+    """拉市场背景 + 重仓新闻。整体包在外层 try 里(调用方负责降级)。"""
+    with httpx.Client(timeout=10.0, headers=HTTP_HEADERS, follow_redirects=True) as client:
+        market_ctx = fetch_market_context(client)
+        news_by_symbol = {
+            p["symbol"]: fetch_news_for_symbol(
+                p["symbol"], client, name=p.get("name"),
+                limit=settings.hourly_analysis_news_per_stock,
+            )
+            for p in heavy_positions
+        }
+    return market_ctx, news_by_symbol
+
+
+def generate_hourly_analysis(db: Session) -> dict:
+    """每整点编排:持仓→重仓→调研→AI→落库→Bark。全程 fail-soft。"""
+    generated_at = datetime.utcnow()
+    positions = list_positions(db)
+    account = get_latest_account(db)
+
+    if not positions or not account:
+        analysis = _degraded("暂无持仓/账户数据,请先同步")
+        return _persist_and_push(db, generated_at, account, [], "", analysis, degraded=True)
+
+    heavy = select_heavy_positions(
+        positions, account, db,
+        top_n=settings.hourly_analysis_top_n,
+        min_pct=settings.hourly_analysis_min_position_pct,
+    )
+
+    # 市场数据(fail-soft)
+    market_ctx, news_by_symbol = {}, {}
+    try:
+        market_ctx, news_by_symbol = _collect_market_data(heavy)
+    except Exception as exc:
+        logger.warning("position-analysis 市场数据降级: %s", exc)
+
+    # web_search 调研(fail-soft;gather_research 自身永不抛,这里再兜一层)
+    research = ""
+    if settings.hourly_analysis_websearch_enabled:
+        try:
+            tickers = [p["symbol"] for p in heavy]
+            content = "组合重仓体检:" + ", ".join(tickers)
+            research = gather_research(content, tickers)
+        except Exception as exc:
+            logger.warning("position-analysis 调研降级: %s", exc)
+            research = ""
+
+    analysis = _call_ai(account, heavy, market_ctx, news_by_symbol, research)
+    degraded = bool(analysis.get("degraded"))
+    return _persist_and_push(db, generated_at, account, heavy, research, analysis, degraded=degraded)
+
+
+def _persist_and_push(db, generated_at, account, heavy, research, analysis, degraded) -> dict:
+    """落库 + Bark 推送(每整点都推)。返回报告 dict。"""
+    account_json = None
+    if account is not None:
+        account_json = json.dumps({
+            "net_assets": getattr(account, "net_assets", None),
+            "market_value": getattr(account, "market_value", None),
+            "total_cash": getattr(account, "total_cash", None),
+            "day_pnl": getattr(account, "day_pnl", None),
+        }, ensure_ascii=False)
+
+    row = PositionAnalysisReport(
+        generated_at=generated_at,
+        account_json=account_json,
+        positions_json=json.dumps(heavy, ensure_ascii=False, default=str),
+        research_brief=research or "",
+        analysis_json=json.dumps(analysis, ensure_ascii=False),
+        summary=analysis.get("summary", ""),
+        push_status="pending",
+        degraded=degraded,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    # 推送(account 为 None 时给个占位,_build_push 用 getattr 安全)
+    title, body = _build_push(analysis, account)
+    res = send_bark(title, body, group="position-analysis", level="active")
+    row.push_status = "sent" if res.get("ok") else "failed"
+    row.push_detail = str(res.get("detail"))[:500]
+    db.commit()
+    db.refresh(row)
+
+    return _row_to_dict(row)
+
+
+def _row_to_dict(row: PositionAnalysisReport) -> dict:
+    return {
+        "id": row.id,
+        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "account": json.loads(row.account_json) if row.account_json else None,
+        "positions": json.loads(row.positions_json) if row.positions_json else [],
+        "research_brief": row.research_brief or "",
+        "analysis": json.loads(row.analysis_json) if row.analysis_json else {},
+        "summary": row.summary,
+        "push_status": row.push_status,
+        "degraded": row.degraded,
+    }
+
+
+def get_latest_report(db: Session) -> dict | None:
+    row = (
+        db.query(PositionAnalysisReport)
+        .order_by(PositionAnalysisReport.generated_at.desc())
+        .first()
+    )
+    return _row_to_dict(row) if row else None
+
+
+def list_report_history(db: Session, limit: int = 24) -> list[dict]:
+    rows = (
+        db.query(PositionAnalysisReport)
+        .order_by(PositionAnalysisReport.generated_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [_row_to_dict(r) for r in rows]

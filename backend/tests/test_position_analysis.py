@@ -82,3 +82,53 @@ def test_build_push_contains_assets_summary_and_alerts():
     assert "整体持有" in body             # summary 进正文
     assert "NVDA 财报临近" in body         # alert 前两条进正文
     assert "GOOG 反垄断进展" in body
+
+
+from app.models.position_analysis_report import PositionAnalysisReport
+
+
+def test_generate_persists_report_and_pushes_even_when_research_fails(db_session):
+    account = SimpleNamespace(net_assets=1000.0, market_value=900.0,
+                             total_cash=100.0, day_pnl=5.0, buy_power=200.0)
+    positions = [_pos("AAA.US", 600)]
+    analysis = {"overall_stance": "持", "per_position": [],
+                "alerts": ["x"], "summary": "持有 AAA"}
+
+    with patch.object(pa, "list_positions", return_value=positions), \
+         patch.object(pa, "get_latest_account", return_value=account), \
+         patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v), \
+         patch.object(pa, "_collect_market_data", side_effect=RuntimeError("news down")), \
+         patch.object(pa, "gather_research", side_effect=RuntimeError("ws down")), \
+         patch.object(pa, "_call_ai", return_value=analysis), \
+         patch.object(pa, "send_bark", return_value={"ok": True, "detail": "ok"}) as mock_bark:
+        out = pa.generate_hourly_analysis(db_session)
+
+    # 报告落库
+    rows = db_session.query(PositionAnalysisReport).all()
+    assert len(rows) == 1
+    assert rows[0].research_brief == ""        # 调研失败 → 空,但不崩
+    assert rows[0].push_status == "sent"
+    mock_bark.assert_called_once()
+    assert out["summary"] == "持有 AAA"
+
+
+def test_generate_no_positions_pushes_degraded(db_session):
+    with patch.object(pa, "list_positions", return_value=[]), \
+         patch.object(pa, "get_latest_account", return_value=None), \
+         patch.object(pa, "send_bark", return_value={"ok": True, "detail": "ok"}) as mock_bark:
+        out = pa.generate_hourly_analysis(db_session)
+    rows = db_session.query(PositionAnalysisReport).all()
+    assert len(rows) == 1
+    assert rows[0].degraded is True
+    mock_bark.assert_called_once()
+    assert "暂无" in out["summary"]
+
+
+def test_get_latest_report_returns_most_recent(db_session):
+    from datetime import datetime, timedelta
+    old = PositionAnalysisReport(generated_at=datetime.utcnow() - timedelta(hours=1), summary="旧")
+    new = PositionAnalysisReport(generated_at=datetime.utcnow(), summary="新")
+    db_session.add_all([old, new])
+    db_session.commit()
+    got = pa.get_latest_report(db_session)
+    assert got["summary"] == "新"
