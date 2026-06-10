@@ -72,6 +72,18 @@ class Settings(BaseSettings):
     # SDK 默认 2 次扛不住;辩论是后台流程,可多retry trickle 着过。
     debate_api_max_retries: int = 6
 
+    # —— 每小时仓位体检 worker (hourly position analysis) ——
+    # spec: docs/superpowers/specs/2026-06-10-hourly-position-analysis-design.md
+    hourly_analysis_enabled: bool = True
+    hourly_analysis_top_n: int = 5            # 监控前 N 大重仓
+    hourly_analysis_min_position_pct: float = 5.0   # 占净资产% 阈值,达标才进重仓深调
+    hourly_analysis_news_per_stock: int = 3   # 每只重仓拉几条新闻
+    hourly_analysis_model: str = ""           # 留空则回退 anthropic_model
+    hourly_analysis_websearch_enabled: bool = True
+
+    def hourly_model(self) -> str:
+        return self.hourly_analysis_model or self.anthropic_model
+
     # Database
     database_url: str = f"sqlite:///{PROJECT_ROOT / 'data' / 'trading.db'}"
 
