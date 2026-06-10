@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from anthropic import Anthropic
@@ -201,7 +201,7 @@ def _collect_market_data(heavy_positions: list[dict]) -> tuple[dict, dict]:
 
 def generate_hourly_analysis(db: Session) -> dict:
     """每整点编排:持仓→重仓→调研→AI→落库→Bark。全程 fail-soft。"""
-    generated_at = datetime.utcnow()
+    generated_at = datetime.now(timezone.utc)
     positions = list_positions(db)
     account = get_latest_account(db)
 
@@ -277,7 +277,7 @@ def _persist_and_push(db, generated_at, account, heavy, research, analysis, degr
 def _row_to_dict(row: PositionAnalysisReport) -> dict:
     return {
         "id": row.id,
-        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "generated_at": _ensure_utc(row.generated_at).isoformat() if row.generated_at else None,
         "account": json.loads(row.account_json) if row.account_json else None,
         "positions": json.loads(row.positions_json) if row.positions_json else [],
         "research_brief": row.research_brief or "",
@@ -286,6 +286,11 @@ def _row_to_dict(row: PositionAnalysisReport) -> dict:
         "push_status": row.push_status,
         "degraded": row.degraded,
     }
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """SQLite 存的 naive datetime 当 UTC 用,输出带 +00:00 offset 防前端按本地时区误解析。"""
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def get_latest_report(db: Session) -> dict | None:
