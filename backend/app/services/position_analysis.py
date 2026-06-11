@@ -383,6 +383,65 @@ def get_latest_report(db: Session) -> dict | None:
     return _row_to_dict(row) if row else None
 
 
+def ingest_external_report(
+    db: Session,
+    *,
+    summary: str,
+    report_markdown: str,
+    alerts: list[str] | None = None,
+    model: str | None = None,
+    push: bool = True,
+) -> dict:
+    """外部(Claude Code headless)生成的报告落库 + Bark 推送。
+
+    summary 进 summary 字段(Bark 正文首行);完整 markdown 存 analysis_json.report_markdown
+    (经 /latest /history 可取全文)。push=True 时按现有 _build_push 推一条精炼摘要。
+    """
+    account = get_latest_account(db)
+    analysis = {
+        "overall_stance": "",
+        "per_position": [],
+        "alerts": alerts or [],
+        "summary": summary,
+        "report_markdown": report_markdown,
+        "source": "claude-code",
+        "model": model,
+    }
+    account_json = None
+    if account is not None:
+        account_json = json.dumps({
+            "net_assets": getattr(account, "net_assets", None),
+            "market_value": getattr(account, "market_value", None),
+            "total_cash": getattr(account, "total_cash", None),
+            "day_pnl": getattr(account, "day_pnl", None),
+        }, ensure_ascii=False)
+
+    row = PositionAnalysisReport(
+        generated_at=datetime.now(timezone.utc),
+        account_json=account_json,
+        positions_json="[]",
+        research_brief="",
+        analysis_json=json.dumps(analysis, ensure_ascii=False),
+        summary=summary,
+        push_status="pending",
+        degraded=False,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    if push:
+        title, body = _build_push(analysis, account)
+        res = send_bark(title, body, group="position-analysis", level="active")
+        row.push_status = "sent" if res.get("ok") else "failed"
+        row.push_detail = str(res.get("detail"))[:500]
+    else:
+        row.push_status = "skipped"
+    db.commit()
+    db.refresh(row)
+    return _row_to_dict(row)
+
+
 def list_report_history(db: Session, limit: int = 24) -> list[dict]:
     rows = (
         db.query(PositionAnalysisReport)

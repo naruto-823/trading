@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.naruo.trading-hourly-analysis</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/naruo/Desktop/work/ai/trading/automation/run_hourly_analysis.sh</string>
+    </array>
+
+    <!-- 每整点 :00 触发 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 加载时不立即跑(等下一个整点);避免装上就多跑一次 -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/naruo/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/trading_hourly_analysis.launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/trading_hourly_analysis.launchd.err</string>
+</dict>
+</plist>

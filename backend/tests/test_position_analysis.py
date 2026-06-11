@@ -187,3 +187,33 @@ def test_gather_research_tavily_failsoft_skips_failed_symbol():
          patch.object(pa.httpx, "Client", return_value=fake_client):
         brief = pa._gather_research_tavily([{"symbol": "NVDA.US", "name": "Nvidia"}])
     assert brief == ""  # 搜索失败 → 跳过该只,不抛
+
+
+# —— 外部(Claude Code)报告 ingest ——
+
+def test_ingest_external_report_persists_and_pushes(db_session):
+    with patch.object(pa, "get_latest_account", return_value=SimpleNamespace(net_assets=100.0, day_pnl=1.0)), \
+         patch.object(pa, "send_bark", return_value={"ok": True, "detail": "ok"}) as mock_bark:
+        out = pa.ingest_external_report(
+            db_session,
+            summary="纳指走强,MSFT 加仓",
+            report_markdown="# 详尽报告\n\n## MSFT\n深度分析...",
+            alerts=["META 575P 本周到期"],
+        )
+    from app.models.position_analysis_report import PositionAnalysisReport
+    rows = db_session.query(PositionAnalysisReport).all()
+    assert len(rows) == 1
+    assert out["push_status"] == "sent"
+    assert out["analysis"]["report_markdown"].startswith("# 详尽报告")
+    assert out["summary"] == "纳指走强,MSFT 加仓"
+    mock_bark.assert_called_once()
+
+
+def test_ingest_external_report_no_push(db_session):
+    with patch.object(pa, "get_latest_account", return_value=None), \
+         patch.object(pa, "send_bark") as mock_bark:
+        out = pa.ingest_external_report(
+            db_session, summary="s", report_markdown="md", push=False,
+        )
+    assert out["push_status"] == "skipped"
+    mock_bark.assert_not_called()

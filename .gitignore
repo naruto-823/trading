@@ -50,3 +50,6 @@ htmlcov/
 
 # Aroon code generation tracking
 .aroon/
+
+# 每小时体检生成的报告(本地产物)
+reports/
