@@ -432,7 +432,8 @@ def ingest_external_report(
 
     if push:
         title, body = _build_push(analysis, account)
-        res = send_bark(title, body, group="position-analysis", level="active")
+        # timeSensitive:突破专注模式,避免每小时报告被埋没漏看
+        res = send_bark(title, body, group="position-analysis", level="timeSensitive")
         row.push_status = "sent" if res.get("ok") else "failed"
         row.push_detail = str(res.get("detail"))[:500]
     else:
