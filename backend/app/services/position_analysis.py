@@ -389,13 +389,15 @@ def ingest_external_report(
     summary: str,
     report_markdown: str,
     alerts: list[str] | None = None,
+    bark_body: str | None = None,
     model: str | None = None,
     push: bool = True,
 ) -> dict:
     """外部(Claude Code headless)生成的报告落库 + Bark 推送。
 
-    summary 进 summary 字段(Bark 正文首行);完整 markdown 存 analysis_json.report_markdown
-    (经 /latest /history 可取全文)。push=True 时按现有 _build_push 推一条精炼摘要。
+    summary 进 summary 字段;完整 markdown 存 analysis_json.report_markdown(经 /latest
+    /history 取全文)。Bark 正文优先用 bark_body(信息全面的紧凑纯文本,手机一条看全),
+    没给则回退 summary + alerts 前两条。
     """
     account = get_latest_account(db)
     analysis = {
@@ -431,7 +433,9 @@ def ingest_external_report(
     db.refresh(row)
 
     if push:
-        title, body = _build_push(analysis, account)
+        title, fallback_body = _build_push(analysis, account)
+        # Bark 正文优先用信息全面的 bark_body(手机一条看全);没给则回退精炼摘要
+        body = (bark_body.strip()[:3500] if bark_body and bark_body.strip() else fallback_body)
         # timeSensitive:突破专注模式,避免每小时报告被埋没漏看
         res = send_bark(title, body, group="position-analysis", level="timeSensitive")
         row.push_status = "sent" if res.get("ok") else "failed"

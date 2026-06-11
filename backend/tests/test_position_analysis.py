@@ -217,3 +217,17 @@ def test_ingest_external_report_no_push(db_session):
         )
     assert out["push_status"] == "skipped"
     mock_bark.assert_not_called()
+
+
+def test_ingest_uses_bark_body_as_push_body(db_session):
+    captured = {}
+    def fake_bark(title, body, **kw):
+        captured["body"] = body
+        return {"ok": True, "detail": "ok"}
+    with patch.object(pa, "get_latest_account", return_value=SimpleNamespace(net_assets=100.0, day_pnl=1.0)), \
+         patch.object(pa, "send_bark", side_effect=fake_bark):
+        pa.ingest_external_report(
+            db_session, summary="短摘要",
+            report_markdown="# 全文", bark_body="【总览】详细全文信息……",
+        )
+    assert captured["body"] == "【总览】详细全文信息……"  # 用 bark_body 而非短摘要

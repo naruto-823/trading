@@ -16,6 +16,7 @@ router = APIRouter()
 class IngestBody(BaseModel):
     summary: str
     report_markdown: str
+    bark_body: str | None = None
     alerts: list[str] | None = None
     model: str | None = None
     push: bool = True
@@ -48,6 +49,7 @@ def ingest(body: IngestBody, db: Session = Depends(get_db)):
         db,
         summary=body.summary,
         report_markdown=body.report_markdown,
+        bark_body=body.bark_body,
         alerts=body.alerts,
         model=body.model,
         push=body.push,
