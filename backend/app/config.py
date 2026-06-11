@@ -75,9 +75,7 @@ class Settings(BaseSettings):
     # —— 每小时仓位体检 worker (hourly position analysis) ——
     # spec: docs/superpowers/specs/2026-06-10-hourly-position-analysis-design.md
     hourly_analysis_enabled: bool = True
-    hourly_analysis_top_n: int = 5            # 监控前 N 大重仓
-    hourly_analysis_min_position_pct: float = 5.0   # 占净资产% 阈值,达标才进重仓深调
-    hourly_analysis_news_per_stock: int = 3   # 每只重仓拉几条新闻
+    hourly_analysis_news_per_stock: int = 3   # 每个标的拉几条新闻
     hourly_analysis_model: str = ""           # 留空则回退 anthropic_model
     hourly_analysis_websearch_enabled: bool = True   # 深度调研开关(用 Tavily 实搜)
     hourly_analysis_research_results: int = 4 # 每只重仓 Tavily 调研拉几条

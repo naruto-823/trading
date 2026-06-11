@@ -1,6 +1,6 @@
 """每小时仓位体检服务
 
-数据流:持仓 → 重仓筛选 → 新闻 + web_search 调研 → Anthropic 出结构化指导
+数据流:全部持仓(正股+期权) → 按去重标的拉新闻 + Tavily 调研 → Anthropic 出结构化指导
        → 落库 position_analysis_report → Bark 推摘要。
 全程 fail-soft:任一步异常降级(degraded=True),绝不整轮崩。
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -37,7 +38,8 @@ SYSTEM_PROMPT = """你是用户的**仓位体检官**——每小时给他的持
   **硬护栏:covered call 只能在该正股持仓 ≥100 股时提;不足 100 股或没持有,禁止建议 covered call。**
 - 两可决策给出你的**独立判断**(不要"看个人风险偏好"和稀泥);纯防御性问题直接给执行动作。
 
-【输入】账户概览 + 重仓清单(含成本/现价/占比/浮亏率/当日涨跌)+ 重仓近期新闻标题 + web_search 研究简报 + 市场背景。
+【输入】账户概览 + **全部持仓清单(正股 + 期权合约)**+ 各标的近期新闻标题 + Tavily 研究简报 + 市场背景。
+持仓里 `是否期权=true` 的是期权合约,带 `期权` 字段(标的/方向 call|put/行权价/到期/持仓方向 卖出short|买入long)。
 
 【输出】严格 JSON(不要 markdown 包裹),schema:
 {
@@ -50,11 +52,12 @@ SYSTEM_PROMPT = """你是用户的**仓位体检官**——每小时给他的持
 }
 
 【硬规则】
-1. per_position 覆盖输入的每只重仓,不要漏。
+1. **per_position 必须覆盖输入里的每一个持仓 —— 正股、小仓、期权合约一个都不能漏**(symbol 用输入里的原始 symbol)。
 2. read / guidance 必须基于输入里的真实数据(占比、浮亏率、新闻标题、调研简报、市场背景),**不要编股价、财报日期、市占率等输入里没有的硬事实**。
-3. 不要"持有观察""关注 XX 价位"这种没信息量的空话;guidance 要可执行。
-4. covered call 建议严守 ≥100 股护栏(见上)。
-5. summary 是要推到他手机锁屏的那句话,务必精炼、有判断、有动作。"""
+3. **期权合约**的 guidance 要落到期权语义:卖出的 put/call 看权利金盈亏 + 到期临近该 roll / 平仓 / 让其行权 / 被行权风险;买入的 call/put 看时间价值衰减 + 是否止盈止损。对应正股够不够 covered 也要点。
+4. 不要"持有观察""关注 XX 价位"这种没信息量的空话;guidance 要可执行。
+5. covered call 建议严守 ≥100 股护栏(见上)。
+6. summary 是要推到他手机锁屏的那句话,务必精炼、有判断、有动作。"""
 
 
 def _parse_analysis_json(text: str) -> dict:
@@ -85,22 +88,43 @@ def _parse_analysis_json(text: str) -> dict:
         }
 
 
-def _is_option(symbol: str) -> bool:
-    # 期权合约 symbol(如 MSFT260618C440000.US):长 + 含 C/P + 含数字
-    return len(symbol) > 12 and any(c in symbol for c in ["C", "P"]) and any(d.isdigit() for d in symbol)
+_OPTION_RE = re.compile(r"^([A-Z]+)(\d{6})([CP])(\d+)(\.[A-Z]+)$")
 
 
-def select_heavy_positions(positions, account, db, top_n: int, min_pct: float) -> list[dict]:
-    """选重仓:占净资产% ≥ min_pct 的、按 HKD 市值降序的前 top_n 只(剔除期权)。
-    没有任何仓位达标时,兜底取市值前 top_n。返回 enrich 后的 dict 列表。
+def _parse_option(symbol: str) -> dict | None:
+    """解析美式期权合约 symbol(MSFT260618C440000.US)→
+    {underlying, type:'call'|'put', strike, expiry}。非期权返回 None。
+    格式:{TICKER}{YYMMDD}{C|P}{行权价×1000}.{MKT}
+    """
+    m = _OPTION_RE.match(symbol.strip().upper())
+    if not m:
+        return None
+    ticker, expiry, cp, strike_raw, suffix = m.groups()
+    return {
+        "underlying": f"{ticker}{suffix}",
+        "type": "call" if cp == "C" else "put",
+        "strike": int(strike_raw) / 1000.0,
+        "expiry": f"20{expiry[:2]}-{expiry[2:4]}-{expiry[4:6]}",
+    }
+
+
+def _underlying_of(p: dict) -> str:
+    """持仓 dict 的底层标的:期权取其标的,正股取自身 symbol。"""
+    opt = p.get("期权")
+    return opt["标的"] if opt else p["symbol"]
+
+
+def select_positions_for_analysis(positions, account, db) -> list[dict]:
+    """enrich 全部持仓(正股 + 期权),按 |HKD 市值| 降序。
+    期权解析出标的/方向/行权价/到期,挂在 `期权` 字段上,供 AI 按期权语义分析。
     """
     net = float(getattr(account, "net_assets", 0) or 0)
-    stocks = [p for p in positions if not _is_option(p.symbol)]
     enriched = []
-    for p in stocks:
+    for p in positions:
         hkd_mv = fx_service.to_hkd(abs(p.market_value), p.currency, db)
         pct = (hkd_mv / net * 100) if net > 0 else 0.0
-        enriched.append({
+        opt = _parse_option(p.symbol)
+        row = {
             "symbol": p.symbol,
             "name": p.name,
             "数量": p.quantity,
@@ -112,18 +136,25 @@ def select_heavy_positions(positions, account, db, top_n: int, min_pct: float) -
             "浮动盈亏": p.unrealized_pnl,
             "浮亏率%": round(p.unrealized_pnl_ratio * 100, 1),
             "当日涨跌%": round(p.day_pnl_ratio * 100, 2),
+            "是否期权": opt is not None,
             "_hkd_mv": hkd_mv,
-        })
+        }
+        if opt:
+            row["期权"] = {
+                "标的": opt["underlying"],
+                "方向": opt["type"],
+                "行权价": opt["strike"],
+                "到期": opt["expiry"],
+                "持仓方向": "卖出short" if p.quantity < 0 else "买入long",
+            }
+        enriched.append(row)
     enriched.sort(key=lambda d: d["_hkd_mv"], reverse=True)
-    heavy = [d for d in enriched if d["占净资产%"] >= min_pct][:top_n]
-    if not heavy:
-        heavy = enriched[:top_n]  # 兜底:没仓位达标也别空手
-    for d in heavy:
+    for d in enriched:
         d.pop("_hkd_mv", None)
-    return heavy
+    return enriched
 
 
-def _call_ai(account, heavy_positions, market_ctx, news_by_symbol, research) -> dict:
+def _call_ai(account, all_positions, market_ctx, news_by_symbol, research) -> dict:
     """调 Anthropic 原生通道出体检 JSON。fail-soft:任何异常 → degraded 降级结构。"""
     if not settings.anthropic_api_key:
         return _degraded("AI 未配置")
@@ -136,11 +167,11 @@ def _call_ai(account, heavy_positions, market_ctx, news_by_symbol, research) -> 
             "当日盈亏_HKD": getattr(account, "day_pnl", None),
             "购买力_HKD": getattr(account, "buy_power", None),
         },
-        "重仓清单": heavy_positions,
-        "重仓近期新闻标题": {
+        "全部持仓清单": all_positions,
+        "各标的近期新闻标题": {
             sym: [n.get("title", "") for n in news] for sym, news in news_by_symbol.items()
         },
-        "web_search研究简报": research or "(本轮无外部调研)",
+        "Tavily研究简报": research or "(本轮无外部调研)",
         "市场背景": market_ctx,
     }
     try:
@@ -184,36 +215,49 @@ def _build_push(analysis: dict, account) -> tuple[str, str]:
     return title, body
 
 
-def _collect_market_data(heavy_positions: list[dict]) -> tuple[dict, dict]:
-    """拉市场背景 + 重仓新闻。整体包在外层 try 里(调用方负责降级)。"""
+def _distinct_underlyings(positions: list[dict]) -> dict[str, str]:
+    """全部持仓 → 去重的底层标的 {标的symbol: 展示名}(保留首次出现顺序,已按市值排序)。
+    期权归并到其标的,正股是自身。这样新闻/调研只按标的搜一次,不重复、不对期权 symbol 瞎搜。
+    """
+    seen: dict[str, str] = {}
+    for p in positions:
+        u = _underlying_of(p)
+        # 正股的 name 更干净,优先用正股名;首次若是期权则先占位
+        name = "" if p.get("是否期权") else (p.get("name") or "")
+        if u not in seen or (not seen[u] and name):
+            seen[u] = name
+    return seen
+
+
+def _collect_market_data(positions: list[dict]) -> tuple[dict, dict]:
+    """拉市场背景 + 各标的新闻(按去重标的)。整体包在外层 try 里(调用方负责降级)。"""
+    underlyings = _distinct_underlyings(positions)
     with httpx.Client(timeout=10.0, headers=HTTP_HEADERS, follow_redirects=True) as client:
         market_ctx = fetch_market_context(client)
         news_by_symbol = {
-            p["symbol"]: fetch_news_for_symbol(
-                p["symbol"], client, name=p.get("name"),
+            sym: fetch_news_for_symbol(
+                sym, client, name=name or None,
                 limit=settings.hourly_analysis_news_per_stock,
             )
-            for p in heavy_positions
+            for sym, name in underlyings.items()
         }
     return market_ctx, news_by_symbol
 
 
-def _gather_research_tavily(heavy_positions: list[dict]) -> str:
-    """用 Tavily 实搜每只重仓近一周新闻/催化,聚合成研究简报文本喂给体检 AI。
+def _gather_research_tavily(positions: list[dict]) -> str:
+    """用 Tavily 实搜每个底层标的(去重)近一周新闻/催化,聚合成研究简报喂给体检 AI。
 
     替代 Anthropic 托管 web_search —— 当前 AI 中转代理不支持托管工具。
-    fail-soft:未配 TAVILY_API_KEY → 返回 "";单只搜索失败只跳过该只,不影响其余。
+    fail-soft:未配 TAVILY_API_KEY → 返回 "";单个标的搜索失败只跳过,不影响其余。
     """
     if not settings.tavily_api_key:
         return ""
     n = settings.hourly_analysis_research_results
     blocks: list[str] = []
     with httpx.Client(timeout=20.0) as client:
-        for p in heavy_positions:
-            sym = p["symbol"]
+        for sym in _distinct_underlyings(positions):
             base = sym.split(".")[0]
-            name = p.get("name") or ""
-            query = f"{base} {name} stock news catalysts analyst outlook this week".strip()
+            query = f"{base} stock news catalysts analyst outlook this week".strip()
             try:
                 resp = client.post(
                     "https://api.tavily.com/search",
@@ -238,7 +282,7 @@ def _gather_research_tavily(heavy_positions: list[dict]) -> str:
                 snippet = (it.get("content") or "").strip().replace("\n", " ")[:200]
                 lines.append(f"- {title}:{snippet}")
             blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)[:4000]
+    return "\n\n".join(blocks)[:6000]
 
 
 def generate_hourly_analysis(db: Session) -> dict:
@@ -251,32 +295,28 @@ def generate_hourly_analysis(db: Session) -> dict:
         analysis = _degraded("暂无持仓/账户数据,请先同步")
         return _persist_and_push(db, generated_at, account, [], "", analysis, degraded=True)
 
-    heavy = select_heavy_positions(
-        positions, account, db,
-        top_n=settings.hourly_analysis_top_n,
-        min_pct=settings.hourly_analysis_min_position_pct,
-    )
+    all_positions = select_positions_for_analysis(positions, account, db)
 
     # 市场数据(fail-soft)
     market_ctx, news_by_symbol = {}, {}
     try:
-        market_ctx, news_by_symbol = _collect_market_data(heavy)
+        market_ctx, news_by_symbol = _collect_market_data(all_positions)
     except Exception as exc:
         logger.warning("position-analysis 市场数据降级: %s", exc)
 
-    # 深度调研(fail-soft):用 Tavily 实搜每只重仓近一周新闻/催化。
+    # 深度调研(fail-soft):用 Tavily 实搜每个底层标的近一周新闻/催化。
     # 不走 Anthropic 托管 web_search —— 当前 AI 中转代理不支持托管工具(WebSearchToolResultError)。
     research = ""
     if settings.hourly_analysis_websearch_enabled:
         try:
-            research = _gather_research_tavily(heavy)
+            research = _gather_research_tavily(all_positions)
         except Exception as exc:
             logger.warning("position-analysis 调研降级: %s", exc)
             research = ""
 
-    analysis = _call_ai(account, heavy, market_ctx, news_by_symbol, research)
+    analysis = _call_ai(account, all_positions, market_ctx, news_by_symbol, research)
     degraded = bool(analysis.get("degraded"))
-    return _persist_and_push(db, generated_at, account, heavy, research, analysis, degraded=degraded)
+    return _persist_and_push(db, generated_at, account, all_positions, research, analysis, degraded=degraded)
 
 
 def _persist_and_push(db, generated_at, account, heavy, research, analysis, degraded) -> dict:

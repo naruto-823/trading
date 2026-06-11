@@ -4,41 +4,56 @@ from unittest.mock import patch
 from app.services import position_analysis as pa
 
 
-def _pos(symbol, mv, currency="USD"):
+def _pos(symbol, mv, currency="USD", qty=10):
     return SimpleNamespace(
-        symbol=symbol, name=symbol, quantity=10, cost_price=1.0,
+        symbol=symbol, name=symbol, quantity=qty, cost_price=1.0,
         current_price=1.0, market_value=mv, currency=currency,
         unrealized_pnl=0.0, unrealized_pnl_ratio=0.0, day_pnl_ratio=0.0,
     )
 
 
-def test_select_heavy_picks_above_threshold_sorted_desc():
+def test_parse_option_parses_contract():
+    o = pa._parse_option("MSFT260618C440000.US")
+    assert o == {"underlying": "MSFT.US", "type": "call", "strike": 440.0, "expiry": "2026-06-18"}
+    o2 = pa._parse_option("META260702P575000.US")
+    assert o2["type"] == "put" and o2["strike"] == 575.0 and o2["underlying"] == "META.US"
+    assert pa._parse_option("AAPL.US") is None  # 正股不是期权
+
+
+def test_select_includes_all_positions_sorted_desc():
     account = SimpleNamespace(net_assets=1000.0)
+    positions = [_pos("CCC.US", 50), _pos("AAA.US", 600), _pos("BBB.US", 300), _pos("DDD.US", 10)]
+    with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
+        out = pa.select_positions_for_analysis(positions, account, db=None)
+    # 全部保留(含占比 1% 的 DDD),按 |HKD 市值| 降序
+    assert [p["symbol"] for p in out] == ["AAA.US", "BBB.US", "CCC.US", "DDD.US"]
+    assert out[0]["占净资产%"] == 60.0
+
+
+def test_select_keeps_and_parses_options():
+    account = SimpleNamespace(net_assets=1000.0)
+    positions = [_pos("AAA.US", 600), _pos("META260702P575000.US", 200, qty=-1)]
+    with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
+        out = pa.select_positions_for_analysis(positions, account, db=None)
+    syms = [p["symbol"] for p in out]
+    assert "META260702P575000.US" in syms  # 期权不再被剔除
+    opt = next(p for p in out if p["symbol"] == "META260702P575000.US")
+    assert opt["是否期权"] is True
+    assert opt["期权"]["标的"] == "META.US"
+    assert opt["期权"]["方向"] == "put"
+    assert opt["期权"]["持仓方向"] == "卖出short"  # qty<0
+
+
+def test_distinct_underlyings_dedupes_option_to_stock():
+    # 正股 GOOG.US 和 GOOG put 应归并到同一个标的 GOOG.US
     positions = [
-        _pos("AAA.US", 600), _pos("BBB.US", 300),
-        _pos("CCC.US", 50), _pos("DDD.US", 10),
+        {"symbol": "GOOG.US", "name": "Alphabet", "是否期权": False},
+        {"symbol": "GOOG260717P335000.US", "是否期权": True, "期权": {"标的": "GOOG.US"}},
+        {"symbol": "AAPL.US", "name": "Apple", "是否期权": False},
     ]
-    # fx 用 identity:HKD 市值 == market_value
-    with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
-        heavy = pa.select_heavy_positions(positions, account, db=None, top_n=5, min_pct=5.0)
-    syms = [p["symbol"] for p in heavy]
-    assert syms == ["AAA.US", "BBB.US", "CCC.US"]  # DDD 仅 1% 被剔
-
-
-def test_select_heavy_excludes_options():
-    account = SimpleNamespace(net_assets=1000.0)
-    positions = [_pos("AAA.US", 600), _pos("MSFT260627C430000.US", 400)]
-    with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
-        heavy = pa.select_heavy_positions(positions, account, db=None, top_n=5, min_pct=5.0)
-    assert [p["symbol"] for p in heavy] == ["AAA.US"]
-
-
-def test_select_heavy_fallback_to_top_n_when_none_meet_threshold():
-    account = SimpleNamespace(net_assets=100000.0)  # 所有仓位占比都 <5%
-    positions = [_pos("AAA.US", 600), _pos("BBB.US", 300), _pos("CCC.US", 50)]
-    with patch.object(pa.fx_service, "to_hkd", side_effect=lambda v, ccy, db=None: v):
-        heavy = pa.select_heavy_positions(positions, account, db=None, top_n=2, min_pct=5.0)
-    assert [p["symbol"] for p in heavy] == ["AAA.US", "BBB.US"]  # 兜底取市值前 2
+    u = pa._distinct_underlyings(positions)
+    assert list(u.keys()) == ["GOOG.US", "AAPL.US"]  # 去重,GOOG 只一条
+    assert u["GOOG.US"] == "Alphabet"  # 正股名优先
 
 
 def test_parse_analysis_json_plain():
