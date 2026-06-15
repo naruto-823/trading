@@ -16,6 +16,9 @@ def get_longport_config() -> Config:
         app_key=settings.longport_app_key,
         app_secret=settings.longport_app_secret,
         access_token=settings.longport_access_token,
+        # 夜盘行情:需账户在「行情商城」开通 OpenAPI 夜盘行情卡才会真有数据;
+        # 无权限时 overnight_quote 返回 None(无害),开通后即插即用。
+        enable_overnight=True,
     )
 
 _trade_ctx: TradeContext | None = None
