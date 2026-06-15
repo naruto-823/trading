@@ -28,6 +28,10 @@ echo "[$(ts)] ===== 开始本轮体检 =====" >> "$LOG"
 cd "$LIVE" || exit 1
 rm -f /tmp/pa_ingest.json   # 清掉上一轮残留,避免 claude 误判为"续跑"
 
+# 先从长桥网页(登录态)抓夜盘/盘前实时价 → /tmp/lb_overnight.json(fail-soft,失败不阻断)
+rm -f /tmp/lb_overnight.json 2>/dev/null
+"$LIVE/scrape_overnight.sh" >> "$LOG" 2>&1 || echo "[$(ts)] 夜盘抓取失败,本轮用后端常规价" >> "$LOG"
+
 "$CLAUDE" -p "$(cat "$PROMPT")" \
   --allowedTools 'WebSearch' 'WebFetch' 'Bash(curl:*)' 'Bash(date:*)' 'Write' 'Read' \
   >> "$LOG" 2>&1

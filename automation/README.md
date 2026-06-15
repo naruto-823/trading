@@ -47,3 +47,15 @@ plist 的 ProgramArguments 指向 `~/trading-hourly/run_hourly_analysis.sh`。
 脚本每轮先 `curl localhost:8000/api/health`,**后端不在就跳过这一轮**。
 后端进程需保持运行(目前未做成开机自启;后端也在 Desktop 项目内,做 launchd 服务同样受 TCC 限制,
 需要移出 Desktop 或给 Python 授 Full Disk Access)。
+
+## 夜盘/盘前实时价(0 成本,走网页登录态)
+长桥 OpenAPI 夜盘行情卡要 500/月,不买。改从**长桥网页版登录态**白嫖:
+- `scrape_overnight.sh`:用 `agent-browser --cdp 9222` 连一个**带调试端口的 Google Chrome 2 实例**
+  (独立 profile `~/.lb-trade-profile`,一次性登录后持久),`eval document.body.innerText`
+  抓持仓表 → 解析成 `/tmp/lb_overnight.json`(`{quotes:{META:{last,day_pct},...}}`)。
+- wrapper 每轮先跑它(fail-soft);prompt 让 claude 优先用 `/tmp/lb_overnight.json` 的 `last` 当现价。
+- Chrome 2 调试实例挂了脚本会自动用持久 profile 拉起(登录态在,不用重登)。
+- **唯一需人工**:网页登录 cookie 自然过期后(数天~数周),抓到的是登录页 → 无 quotes →
+  自动退回后端收盘价;届时重新在那个 Chrome 2 窗口登录一次即可。
+- 启动调试 Chrome 2(脚本会自动做,手动用):
+  `"/Applications/Google Chrome 2.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222 --user-data-dir=~/.lb-trade-profile https://trade.longbridge.com`
