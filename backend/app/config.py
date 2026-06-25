@@ -50,10 +50,13 @@ class Settings(BaseSettings):
     # spec: docs/superpowers/specs/2026-06-25-discord-news-source-design.md
     discord_news_realtime: bool = False
     discord_cdp_url: str = "http://127.0.0.1:9223"
-    # 抓取频道列表（JSON 数组）：[{"guild":..,"channel":..,"label":..}]
+    # 抓取频道列表（JSON 数组）：[{guild, channel, label, kind}]
+    # kind="summary"（个股新闻拆条）/ "kol"（推文清洗）
     discord_channels_json: str = (
-        '[{"guild":"1394858797025198150",'
-        '"channel":"1431922532872880278","label":"个股新闻日报"}]'
+        '[{"guild":"1394858797025198150","channel":"1398004606570598512",'
+        '"label":"个股新闻","kind":"summary"},'
+        '{"guild":"1394858797025198150","channel":"1431922532872880278",'
+        '"label":"推特大V","kind":"kol"}]'
     )
     discord_poll_interval_s: int = 10
 

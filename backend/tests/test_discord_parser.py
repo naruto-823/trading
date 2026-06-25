@@ -1,48 +1,89 @@
-"""Discord「24小时个股新闻总结」拆条器 parse_news_summary 的单元测试。
+"""Discord 消息拆条/清洗器测试。fixture 全部取自 9223 真实抓到的 innerText
+(非截图渲染——真实文本没有 "1." 编号、裹着 bot名/时间/标题/reaction 噪音)。
 
-bot 一条消息聚合 ~10 条 $TICKER 新闻;拆成单条才能逐条评分/去重。
-重点:正确拆条数、提取 ticker、格式异常时 fail-soft 不崩不丢。
+两类频道,按 kind 分派:
+- summary:「日报-个股新闻」每条 `$TICKER 正文`、逗号分隔、需剔噪音头尾
+- kol:「推特大v推送」每条 = 一条 KOL 推文,需清掉黄金蛙/时间/结构标签
 """
 
-from app.services.discord_parser import parse_news_summary
+from app.services.discord_parser import parse_kol_tweet, parse_message, parse_news_summary
 
-# 截图实采的真实消息(2026/06/24 16:01 纽约时间那条)
-REAL_SUMMARY = """24小时个股新闻总结
-1. $QCOM 高通与Meta达成数据中心CPU合作，Dragonfly C1000将于2028年下半年用于Meta服务器。
-2. $BABA 阿里巴巴被 Anthropic 指控非法访问其 AI 模型，涉及知识产权争议
-3. $BABA Anthropic指控阿里巴巴非法访问其AI模型
-4. $LZ LZ宣布与 AI 搜索公司 Perplexity 达成合作协议
-5. $SLV 白银价格跌50%，RSI超卖，历史数据显示低位买入时机。
-6. $ALTO 特朗普政府推动15亿乙醇汽油全年销售政策，利好乙醇生产商
-7. $LYV Live Nation CEO 在反垄断和解达成前一个月与特朗普总统会谈，涉及票务行业重大和解协议。
-8. $GOOGL 谷歌Gemini 3.5 Pro发布延期至7月，目前在Antigravity和LMArena平台开放测试优化。
-9. $QCOM 高通数据中心业务获Meta、微软采用，预计2027年Q1定制芯片业务开始贡献收入。
-10. $CODX 特朗普将向国会申请超过14亿美元埃博拉病毒防控资金
-个股新闻实时监控 · 06/24, 16:01 纽约时间"""
+# 「日报-个股新闻(24h滚动)」真实 innerText(2026/06/25 5:01 那条,10 条新闻)
+REAL_SUMMARY = """APP
+ —
+5:01 AM
+Thursday, June 25, 2026 at 5:01 AM
+24小时个股新闻总结
+$MU 美光科技披露供应协议客户构成：4家大型客户、3家中型客户及多家汽车行业小型客户。
+,
+$MU 美光CEO披露战略客户协议细节，2026-2030年覆盖20% DRAM和1/3 NAND产能，预计贡献超50%收入。
+,
+$QCOM 高通CFO宣布年收入目标1000亿美元
+,
+$LLY 礼来与Abbisko达成19亿美元研发合作协议，扩大药物研发范围
+,
+个股新闻实时监控 • 06/24, 17:01 纽约时间
+1
+1
+1
+Add Reaction"""
+
+# 「推特大v推送(实时)」真实 innerText
+REAL_KOL = """黄金蛙🐸
+APP
+ —
+4:15 PM
+Thursday, June 25, 2026 at 4:15 PM
+zerohedge (@zerohedge) ✧
+印度从俄罗斯进口的石油即将创下新高
+ 核心观点
+印度从俄罗斯进口石油量将创历史新高。
+ 原文链接
+点击查看原推文
+KOL推文实时翻译•Today at 4:15 PM"""
 
 
-def test_splits_real_summary_into_ten_items():
+# ---- summary:个股新闻拆条 ----
+
+def test_summary_splits_only_dollar_lines():
     items = parse_news_summary(REAL_SUMMARY)
-    assert len(items) == 10
+    assert len(items) == 4  # 只 4 条 $ 行,噪音(标题/时间/reaction)全剔掉
 
 
-def test_extracts_ticker_and_text():
+def test_summary_extracts_ticker_and_text():
     items = parse_news_summary(REAL_SUMMARY)
-    assert items[0]["ticker"] == "QCOM"
-    assert items[0]["text"].startswith("高通与Meta达成数据中心CPU合作")
-    # 第 8 条 ticker 是 GOOGL(带 $ 前缀)
-    assert items[7]["ticker"] == "GOOGL"
+    assert items[0]["ticker"] == "MU"
+    assert items[0]["text"].startswith("美光科技披露供应协议")
+    assert items[2]["ticker"] == "QCOM"
 
 
-def test_fail_soft_degrades_unnumbered_message_to_single_item():
-    # bot 格式偶尔变(没有编号列表)→ 不能丢,整条退化成一条
-    items = parse_news_summary("$TSLA 特斯拉盘前大涨5%")
+def test_summary_drops_noise_lines():
+    items = parse_news_summary(REAL_SUMMARY)
+    texts = " ".join(it["text"] for it in items)
+    assert "24小时个股新闻总结" not in texts
+    assert "Add Reaction" not in texts
+    assert "个股新闻实时监控" not in texts
+
+
+# ---- kol:推文清洗 ----
+
+def test_kol_returns_single_item():
+    items = parse_kol_tweet(REAL_KOL)
     assert len(items) == 1
-    assert items[0]["ticker"] == "TSLA"
-    assert "特斯拉盘前大涨" in items[0]["text"]
 
 
-def test_empty_or_blank_returns_empty():
-    # 空/纯空白不该退化成噪音条目
-    assert parse_news_summary("") == []
-    assert parse_news_summary("   \n  ") == []
+def test_kol_keeps_author_and_body_drops_noise():
+    item = parse_kol_tweet(REAL_KOL)[0]
+    assert "zerohedge" in item["text"]
+    assert "印度从俄罗斯进口的石油" in item["text"]
+    # 噪音清掉
+    assert "黄金蛙" not in item["text"]
+    assert "点击查看原推文" not in item["text"]
+    assert "KOL推文实时翻译" not in item["text"]
+
+
+# ---- dispatch ----
+
+def test_parse_message_dispatches_by_kind():
+    assert len(parse_message(REAL_SUMMARY, "summary")) == 4
+    assert len(parse_message(REAL_KOL, "kol")) == 1

@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any
 
 from app.config import settings
-from app.services.discord_parser import parse_news_summary
+from app.services.discord_parser import parse_message
 from app.services.news_pipeline import process_news_item
 from app.services.notify import send_bark
 
@@ -54,7 +54,7 @@ PAGE_REFRESH_INTERVAL_S = 6 * 3600
 #   正文:   该 li 的 innerText(bot 的总结正文都在里面)
 HOOK_SCRIPT = r"""
 () => {
-    if (window.__discordHookInstalled) return true;
+    if (window.%FLAG%) return true;
 
     function extract(el) {
         let id = '';
@@ -85,7 +85,7 @@ HOOK_SCRIPT = r"""
         }
         for (const data of newOnes) {
             if (data.text && data.text.length > 5) {
-                try { window.__onNewDiscordMsg(data); } catch (e) {}
+                try { window.%CB%(data); } catch (e) {}
             }
             lastSeenIds.add(data.id);
         }
@@ -95,59 +95,58 @@ HOOK_SCRIPT = r"""
     }
 
     poll();
-    window.__discordPoller = setInterval(poll, %POLL_MS%);
-    window.__discordHookInstalled = true;
+    window.%POLLER% = setInterval(poll, %POLL_MS%);
+    window.%FLAG% = true;
     return true;
 }
 """
 
 
-async def _process_message_async(msg: dict[str, Any]) -> None:
-    """从 page 收到一条 bot 消息 → 拆条 → 逐条过共享管道(IO 走线程池)。"""
+async def _process_message_async(msg: dict[str, Any], kind: str, label: str) -> None:
+    """从 page 收到一条 bot 消息 → 按频道类型拆/洗 → 逐条过共享管道(IO 走线程池)。"""
     _state["received"] += 1
     _state["last_received_at"] = datetime.utcnow().isoformat() + "Z"
     try:
-        await asyncio.to_thread(_process_message_sync, msg.get("text") or "")
+        await asyncio.to_thread(_process_message_sync, msg.get("text") or "", kind, label)
     except Exception as exc:
         logger.exception("discord-news process failed: %s", exc)
         _state["last_error"] = str(exc)[:200]
 
 
-def _process_message_sync(text: str) -> None:
-    items = parse_news_summary(text)
+def _process_message_sync(text: str, kind: str = "summary", label: str = "Discord") -> None:
+    items = parse_message(text, kind)
     for it in items:
         _state["items"] += 1
         ticker = it.get("ticker")
         body = it.get("text") or ""
         if not body:
             continue
-        # 去重种子 = ticker + 正文前120字(防整点重叠刷屏),与 Jin10 共用 event_notification
-        dedup_seed = f"{ticker or '?'}|{body[:120]}"
+        # 去重种子 = kind + ticker + 正文前120字(防整点重叠刷屏 + 跨频道误撞),
+        # 与 Jin10 共用 event_notification 表
+        dedup_seed = f"{kind}|{ticker or '?'}|{body[:120]}"
         result = process_news_item(
             body,
             source="discord",
             dedup_seed=dedup_seed,
             known_tickers=[ticker] if ticker else None,
-            source_label="Discord",
+            source_label=label,
             state=_state,
         )
         if result == "sent":
             _state["last_fired_at"] = datetime.utcnow().isoformat() + "Z"
 
 
-async def _find_discord_page(browser, channel: str):
-    """在已连接的浏览器里找到停在目标频道的页面;找不到返回 None。"""
+async def _find_or_open_page(browser, channel: str, url: str):
+    """找到停在目标频道的页面;没有则在第一个 context 新开一页导航过去。"""
     for ctx in browser.contexts:
         for page in ctx.pages:
-            try:
-                if channel in (page.url or ""):
-                    return page
-            except Exception:
-                continue
-    # 没有就用第一个 context 开一页导航过去
-    if browser.contexts and browser.contexts[0].pages:
-        return browser.contexts[0].pages[0]
-    return None
+            if channel in (page.url or ""):
+                return page
+    ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+    page = await ctx.new_page()
+    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+    await asyncio.sleep(5)
+    return page
 
 
 def _looks_logged_out(text: str) -> bool:
@@ -156,18 +155,70 @@ def _looks_logged_out(text: str) -> bool:
     return any(m in text for m in markers) and "chat-messages-" not in text
 
 
+async def _watch_channel(browser, ch: dict, idx: int) -> None:
+    """监听单个频道:注入 hook、6h 刷页、登录态丢失则 Bark 提醒。"""
+    guild, channel = ch["guild"], ch["channel"]
+    kind = ch.get("kind", "summary")
+    label = ch.get("label", "Discord")
+    url = f"https://discord.com/channels/{guild}/{channel}"
+    cb_name = f"__onDiscordMsg_{idx}"
+    hook = (
+        HOOK_SCRIPT.replace("%POLL_MS%", str(settings.discord_poll_interval_s * 1000))
+        .replace("%CB%", cb_name)
+        .replace("%FLAG%", f"__discordHook_{idx}")
+        .replace("%POLLER%", f"__discordPoller_{idx}")
+    )
+
+    page = await _find_or_open_page(browser, channel, url)
+
+    async def _handler(msg):
+        await _process_message_async(msg, kind, label)
+
+    await page.expose_function(cb_name, _handler)  # 跨导航持久,只暴露一次
+
+    while True:  # 6h 刷页大循环
+        if channel not in (page.url or ""):
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            await asyncio.sleep(5)
+
+        body_text = await page.evaluate("document.body.innerText")
+        if _looks_logged_out(body_text):
+            _state["login_lost"] = True
+            _state["last_error"] = "登录态丢失"
+            send_bark(
+                "🔑 Discord 登录态过期",
+                "个股新闻抓取停了,请在 .discord-profile 窗口重新扫码登录",
+                level="timeSensitive", group="market-events",
+            )
+            logger.warning("discord-news[%s]: 登录态丢失,等待重登", label)
+            await asyncio.sleep(300)
+            continue
+        _state["login_lost"] = False
+
+        installed = await page.evaluate(hook)
+        if not installed:
+            raise RuntimeError(f"hook install failed on {label}")
+        _state["connected"] = True
+        logger.info("discord-news: hook installed on %s (%s)", label, kind)
+
+        started_at = datetime.utcnow()
+        while (datetime.utcnow() - started_at).total_seconds() < PAGE_REFRESH_INTERVAL_S:
+            await asyncio.sleep(30)
+            if not await page.evaluate(f"window.__discordHook_{idx} === true"):
+                logger.warning("discord-news[%s]: hook lost", label)
+                break
+        await page.reload(wait_until="domcontentloaded")
+        await asyncio.sleep(5)
+
+
 async def _run_loop() -> None:
-    """长期跑:连 CDP → 注入 hook → 监听新消息;失败自动重连。"""
+    """长期跑:连 CDP → 为每个配置频道起一个 watch 协程;失败自动重连。"""
     from playwright.async_api import async_playwright
 
     channels = settings.discord_channels
     if not channels:
         logger.warning("discord-news: 无频道配置,退出")
         return
-    target = channels[0]  # 第一期只接一个频道
-    guild, channel = target["guild"], target["channel"]
-    url = f"https://discord.com/channels/{guild}/{channel}"
-    hook = HOOK_SCRIPT.replace("%POLL_MS%", str(settings.discord_poll_interval_s * 1000))
 
     async with async_playwright() as p:
         while True:
@@ -175,47 +226,12 @@ async def _run_loop() -> None:
             try:
                 logger.info("discord-news: connecting CDP %s", settings.discord_cdp_url)
                 browser = await p.chromium.connect_over_cdp(settings.discord_cdp_url)
-                page = await _find_discord_page(browser, channel)
-                if page is None:
-                    raise RuntimeError("没有可用页面;请先跑 discord_login.sh 并登录")
-
-                if channel not in (page.url or ""):
-                    await page.goto(url, timeout=30000, wait_until="domcontentloaded")
-                    await asyncio.sleep(5)
-
-                body_text = await page.evaluate("document.body.innerText")
-                if _looks_logged_out(body_text):
-                    _state["login_lost"] = True
-                    _state["last_error"] = "登录态丢失"
-                    send_bark(
-                        "🔑 Discord 登录态过期",
-                        "个股新闻抓取停了,请在 .discord-profile 窗口重新扫码登录",
-                        level="timeSensitive", group="market-events",
-                    )
-                    logger.warning("discord-news: 登录态丢失,等待重登")
-                    await asyncio.sleep(300)
-                    continue
-                _state["login_lost"] = False
-
-                await page.expose_function("__onNewDiscordMsg", _process_message_async)
-                installed = await page.evaluate(hook)
-                if not installed:
-                    raise RuntimeError("hook install failed")
-
-                _state["connected"] = True
                 _state["last_error"] = None
-                logger.info("discord-news: hook installed on %s", channel)
-
-                started_at = datetime.utcnow()
-                while True:
-                    await asyncio.sleep(30)
-                    if (datetime.utcnow() - started_at).total_seconds() > PAGE_REFRESH_INTERVAL_S:
-                        logger.info("discord-news: 6h refresh")
-                        break
-                    ok = await page.evaluate("window.__discordHookInstalled === true")
-                    if not ok:
-                        logger.warning("discord-news: hook lost")
-                        break
+                tasks = [
+                    asyncio.create_task(_watch_channel(browser, ch, i))
+                    for i, ch in enumerate(channels)
+                ]
+                await asyncio.gather(*tasks)  # 任一频道抛错 → 整体重连
             except asyncio.CancelledError:
                 logger.info("discord-news: cancelled")
                 raise
@@ -224,13 +240,11 @@ async def _run_loop() -> None:
                 logger.error("discord-news loop error: %s", exc, exc_info=True)
             finally:
                 _state["connected"] = False
-                # 连的是外部调试 Chrome,不关浏览器,只断开连接
                 if browser is not None:
                     try:
                         await browser.close()
                     except Exception:
                         pass
-
             _state["reconnects"] += 1
             await asyncio.sleep(30)
 
