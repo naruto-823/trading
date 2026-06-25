@@ -21,11 +21,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.longbridge.realtime import start_realtime
     from app.services.daily_baseline import bootstrap_baseline_if_missing
     from app.services.debate_queue import shutdown_debate_executor
-    from app.workers import jin10_browser_worker
+    from app.workers import discord_news_worker, jin10_browser_worker
     from app.workers.scheduler import shutdown_scheduler, start_scheduler
 
     start_scheduler()
     jin10_browser_worker.start()  # settings.jin10_browser_realtime=False 时 no-op
+    discord_news_worker.start()  # settings.discord_news_realtime=False 时 no-op
     start_realtime()  # Longbridge 实时报价 push 订阅；无凭证 / 空持仓时 no-op
     # 当日资产基线（缺失则从历史 AccountSnapshot 回填，让 day_pnl 第一刻就有合理值）
     _db = SessionLocal()
@@ -37,6 +38,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         yield
     finally:
         await jin10_browser_worker.stop()
+        await discord_news_worker.stop()
         shutdown_scheduler()
         shutdown_debate_executor()
 

@@ -44,6 +44,28 @@ class Settings(BaseSettings):
     # 真亚秒级，~150MB 内存代价。和 MCP 1min 轮询并存（共用 event_notification 去重）
     jin10_browser_realtime: bool = False
 
+    # —— Discord 个股新闻数据源（浏览器登录态抓取）——
+    # 连持久 profile 的调试 Chrome（见 automation/discord_login.sh，headful 避开 headless 检测）。
+    # 默认关；ToS 灰色，只读不发。与 Jin10 共用 news_pipeline + event_notification 去重。
+    # spec: docs/superpowers/specs/2026-06-25-discord-news-source-design.md
+    discord_news_realtime: bool = False
+    discord_cdp_url: str = "http://127.0.0.1:9223"
+    # 抓取频道列表（JSON 数组）：[{"guild":..,"channel":..,"label":..}]
+    discord_channels_json: str = (
+        '[{"guild":"1394858797025198150",'
+        '"channel":"1431922532872880278","label":"个股新闻日报"}]'
+    )
+    discord_poll_interval_s: int = 10
+
+    @property
+    def discord_channels(self) -> list[dict]:
+        import json
+
+        try:
+            return json.loads(self.discord_channels_json)
+        except (ValueError, TypeError):
+            return []
+
     # Quick Assess 相关性评分：LLM 判断快讯对用户持仓真实影响，过门槛才推
     # 阈值 0-100；score<阈值的不推（但仍落库，可在 dashboard 看）；0=禁用 scorer 全推
     # Haiku 4.5 单次 ~$0.001，每天 200-500 次 ≈ $0.3-0.5/day
