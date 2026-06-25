@@ -14,25 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from app.config import settings
-from app.db import SessionLocal
-from app.models.event_notification import EventNotification
-from app.services.debate_queue import submit_debate
-from app.services.debate_scorer import should_escalate
-from app.services.macro_feed import MacroFlash
-from app.services.macro_pusher import matches_keywords
-from app.services.notify import send_bark
-from app.services.relevance_scorer import score_relevance
+from app.services.news_pipeline import process_news_item
 
 logger = logging.getLogger(__name__)
-
-_DIR_EMOJI = {"bullish": "📈", "bearish": "📉", "neutral": ""}
 
 _browser_task: asyncio.Task | None = None
 _state: dict[str, Any] = {
@@ -123,130 +112,34 @@ async def _process_flash_async(flash: dict[str, Any]) -> None:
 
 
 def _process_flash_sync(flash: dict[str, Any]) -> None:
+    """委托给共享管道处理一条金十快讯。
+
+    金十特有的部分:① 跨源去重 hash(跟 macro_pusher 1min 轮询共享,不双推);
+    ② 来源标记 jin10-rt / 标题前缀「金十」/ tags 取 dataset.relevance。
+    其余评分/门控/推送全在 news_pipeline.process_news_item。
+    """
     content = (flash.get("text") or "").strip()
     if not content:
         return
 
-    item = MacroFlash(
-        time=datetime.now(timezone.utc),
-        title=content[:80],
-        content=content,
-        importance=5 if flash.get("is_important") else 3,
-        source="jin10",
-        tags=[flash["relevance"]] if flash.get("relevance") else [],
-    )
-
-    if not matches_keywords(item):
-        _state["filtered"] += 1
-        return
-
-    # 双 hash 去重：跟 macro_pusher 共享 event_notification 不会双推
-    dedup_key = flash.get("id") or content[:120]
-    h = hashlib.sha256(f"jin10-rt|{dedup_key}".encode()).hexdigest()[:32]
     h_macro_pusher = hashlib.sha256(
         f"macro|jin10|{content[:120].lower()}".encode()
     ).hexdigest()[:32]
 
-    db = SessionLocal()
-    try:
-        if db.query(EventNotification).filter(
-            EventNotification.event_hash.in_([h, h_macro_pusher])
-        ).first():
-            _state["deduped"] += 1
-            return
+    result = process_news_item(
+        content,
+        source="jin10-rt",
+        dedup_seed=flash.get("id") or content[:120],
+        is_important=bool(flash.get("is_important")),
+        cross_source_hashes=[h_macro_pusher],
+        source_label="金十",
+        tags=[flash["relevance"]] if flash.get("relevance") else None,
+        state=_state,
+    )
 
-        # Quick Assess：多维度评分
-        scoring = score_relevance(content)
-        score = scoring["score"]
-        affected = scoring["affected_tickers"]
-        affected_json = json.dumps(affected, ensure_ascii=False) if affected else None
-        symbol = affected[0] if affected else None
-
-        common_kwargs = dict(
-            id=uuid.uuid4().hex,
-            event_hash=h,
-            notified_at=datetime.utcnow(),
-            symbol=symbol,
-            source_title=f"[jin10-realtime] {content[:200]}",
-            relevance=scoring["relevance"],
-            relevance_score=score,
-            relevance_reason=scoring["reason"],
-            sentiment=scoring["sentiment"],
-            direction=scoring["direction"],
-            confidence=scoring["confidence"],
-            affected_tickers_json=affected_json,
-        )
-
-        # 两阶段门控:高 stakes 快讯升级到完整辩论(异步,不在此处推送)
-        if should_escalate(scoring, item.importance):
-            rec = EventNotification(
-                **common_kwargs,
-                importance="high" if flash.get("is_important") else "medium",
-                title=content[:200],
-                body=content[:500],
-                push_status="debating",
-                push_error=None,
-            )
-            db.add(rec)
-            db.commit()
-            submit_debate(rec.id)
-            _state["escalated"] += 1
-            logger.info("jin10-browser escalated to debate: %s", content[:60])
-            return
-
-        if score < settings.relevance_threshold:
-            rec = EventNotification(
-                **common_kwargs,
-                importance="high" if flash.get("is_important") else "medium",
-                title=content[:200],
-                body=content[:500],
-                push_status="skipped_low_relevance",
-                push_error=None,
-            )
-            db.add(rec)
-            db.commit()
-            _state["scored_low"] += 1
-            logger.info("jin10-browser skipped [score=%d %s dir=%s]: %s",
-                        score, scoring["relevance"], scoring["direction"], content[:60])
-            return
-
-        # 高分：推 Bark，title 加 emoji + ticker
-        marker = "⚡" if flash.get("is_important") else "📡"
-        dir_icon = _DIR_EMOJI.get(scoring["direction"], "")
-        ticker_part = f"{affected[0]} " if affected else ""
-        title = f"{marker}{dir_icon}[金十] {ticker_part}{content[:25]}{'…' if len(content) > 25 else ''}"
-
-        # body 头部加一行 sentiment / direction / confidence 标签（不是 neutral 才加）
-        body_lines = []
-        if scoring["sentiment"] != "neutral" or scoring["direction"] != "neutral":
-            sent = {"positive": "利好", "negative": "利空", "neutral": "中性"}[scoring["sentiment"]]
-            dir_label = {"bullish": "看涨", "bearish": "看跌", "neutral": "中性"}[scoring["direction"]]
-            body_lines.append(f"{sent} · {dir_label} · 可信度 {scoring['confidence']}%")
-        body_lines.append(content)
-        body = "\n".join(body_lines)[:500]
-
-        level = "timeSensitive" if flash.get("is_important") else "active"
-        result = send_bark(title, body, level=level, group="market-events", sound="chime")
-
-        rec = EventNotification(
-            **common_kwargs,
-            importance="high" if flash.get("is_important") else "medium",
-            title=content[:200],
-            body=body,
-            push_status="sent" if result["ok"] else "failed",
-            push_error=None if result["ok"] else str(result["detail"])[:500],
-        )
-        db.add(rec)
-        db.commit()
-
-        if result["ok"]:
-            _state["fired"] += 1
-            _state["last_fired_at"] = datetime.utcnow().isoformat() + "Z"
-            _state["last_fired_title"] = content[:80]
-            logger.info("jin10-browser fired [score=%d dir=%s]: %s",
-                        score, scoring["direction"], content[:80])
-    finally:
-        db.close()
+    if result == "sent":
+        _state["last_fired_at"] = datetime.utcnow().isoformat() + "Z"
+        _state["last_fired_title"] = content[:80]
 
 
 async def _run_browser_loop() -> None:

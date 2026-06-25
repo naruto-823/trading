@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 from app.models.event_notification import EventNotification
+from app.services import news_pipeline as np
 from app.workers import jin10_browser_worker as jw
 
 
@@ -13,10 +14,11 @@ _ESCALATING_TRIAGE = {
 
 def test_jin10_flash_escalates_to_debate(db_session):
     flash = {"text": "微软发布 AI 新品,股价异动", "id": "999", "is_important": True}
-    with patch.object(jw, "SessionLocal", return_value=db_session), \
-         patch.object(jw, "score_relevance", return_value=_ESCALATING_TRIAGE), \
-         patch.object(jw, "submit_debate") as mock_submit, \
-         patch.object(jw, "send_bark") as mock_bark:
+    # 逻辑已抽到 news_pipeline,patch 那里;入口仍走 jin10 worker 验证委托
+    with patch.object(np, "SessionLocal", return_value=db_session), \
+         patch.object(np, "score_relevance", return_value=_ESCALATING_TRIAGE), \
+         patch.object(np, "submit_debate") as mock_submit, \
+         patch.object(np, "send_bark") as mock_bark:
         jw._process_flash_sync(flash)
 
     mock_bark.assert_not_called()
