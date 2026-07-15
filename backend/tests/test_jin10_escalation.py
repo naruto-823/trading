@@ -4,7 +4,6 @@ from app.models.event_notification import EventNotification
 from app.services import news_pipeline as np
 from app.workers import jin10_browser_worker as jw
 
-
 _ESCALATING_TRIAGE = {
     "relevance": "direct", "score": 55, "sentiment": "positive",
     "direction": "bullish", "confidence": 60, "affected_tickers": ["MSFT"],

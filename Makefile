@@ -1,4 +1,4 @@
-.PHONY: setup dev dev-backend dev-frontend test lint sync
+.PHONY: setup dev dev-backend dev-frontend test lint sync msft
 
 setup:
 	@echo "==> Setting up backend..."
@@ -28,3 +28,6 @@ lint:
 
 sync:
 	cd backend && uv run python -m app.cli sync --all
+
+msft:
+	cd backend && uv run python -m scripts.msft_decision
