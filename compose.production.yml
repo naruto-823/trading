@@ -1,0 +1,28 @@
+services:
+  api:
+    image: trading-api:${IMAGE_TAG}
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/trading.db
+    expose:
+      - "8000"
+    volumes:
+      - trading_data:/app/data
+
+  web:
+    image: trading-web:${IMAGE_TAG}
+    build:
+      context: .
+      dockerfile: web.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      # 80/443 由 VPS 上的共享 Caddy 占用；防火墙不开放 8081。
+      - "${HOST_PORT:-8081}:80"
+
+volumes:
+  trading_data:

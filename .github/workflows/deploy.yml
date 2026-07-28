@@ -1,0 +1,20 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: naruto-823/docker-vps-deploy-template/.github/workflows/reusable-deploy.yml@v1
+    with:
+      app_name: trading
+      compose_file: compose.production.yml
+      health_url: ${{ vars.PRODUCTION_URL }}/api/health
+      test_command: >-
+        python -m pip install uv &&
+        cd backend && uv sync --frozen --extra dev && uv run pytest -q &&
+        cd ../frontend && corepack enable && corepack prepare pnpm@11.15.1 --activate &&
+        pnpm install --frozen-lockfile && pnpm build
+    secrets: inherit
