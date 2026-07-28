@@ -108,6 +108,29 @@ def _bootstrap_legacy_user() -> None:
 
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.username == settings.auth_username))
+        legacy_username = settings.legacy_auth_username.strip()
+        legacy_user = None
+        if legacy_username and legacy_username != settings.auth_username:
+            legacy_user = db.scalar(select(User).where(User.username == legacy_username))
+        if legacy_user is not None:
+            if user is None:
+                raise RuntimeError(
+                    "Cannot migrate the legacy login: the target system user does not exist"
+                )
+            if (
+                legacy_user.broker_account_id
+                and user.broker_account_id
+                and legacy_user.broker_account_id != user.broker_account_id
+            ):
+                raise RuntimeError(
+                    "Cannot migrate the legacy login: target user owns a different broker account"
+                )
+            legacy_account_id = legacy_user.broker_account_id
+            legacy_user.broker_account_id = None
+            db.flush()
+            if legacy_account_id:
+                user.broker_account_id = legacy_account_id
+            db.delete(legacy_user)
         if user is None:
             salt, password_hash = hash_password(settings.auth_password)
             user = User(

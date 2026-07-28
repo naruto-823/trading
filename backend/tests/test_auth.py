@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_auth_db
 from app.main import app
+from app.models.user import User
 from app.services.auth import authenticate, create_session, verify_session
 
 
@@ -24,6 +25,18 @@ def test_authenticate_and_signed_session(monkeypatch):
     assert authenticate("trader", "correct horse")
     assert not authenticate("trader", "wrong")
     assert verify_session(create_session("trader"))
+
+
+def test_database_password_takes_precedence_over_static_fallback(monkeypatch, db_session: Session):
+    _configure(monkeypatch)
+    from app.services.auth import hash_password
+
+    salt, password_hash = hash_password("naruto-password")
+    db_session.add(User(username="trader", password_salt=salt, password_hash=password_hash))
+    db_session.commit()
+
+    assert authenticate("trader", "naruto-password", db_session)
+    assert not authenticate("trader", "correct horse", db_session)
 
 
 def test_session_rejects_tampering(monkeypatch):

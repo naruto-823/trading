@@ -31,17 +31,14 @@ def hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
 def authenticate(username: str, password: str, db: Session | None = None) -> bool:
     if not auth_is_configured():
         return False
-    if hmac.compare_digest(username, settings.auth_username) and hmac.compare_digest(
+    if db is not None:
+        user = db.scalar(select(User).where(User.username == username))
+        if user is not None:
+            _, candidate = hash_password(password, bytes.fromhex(user.password_salt))
+            return hmac.compare_digest(candidate, user.password_hash)
+    return hmac.compare_digest(username, settings.auth_username) and hmac.compare_digest(
         password, settings.auth_password
-    ):
-        return True
-    if db is None:
-        return False
-    user = db.scalar(select(User).where(User.username == username))
-    if user is None:
-        return False
-    _, candidate = hash_password(password, bytes.fromhex(user.password_salt))
-    return hmac.compare_digest(candidate, user.password_hash)
+    )
 
 
 def create_session(username: str) -> str:
