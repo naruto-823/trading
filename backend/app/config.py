@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     anthropic_base_url: str = ""
     anthropic_model: str = "claude-opus-4-7"
 
+    # Production application login. Local development stays open by default.
+    require_auth: bool = False
+    auth_username: str = ""
+    auth_password: str = ""
+    auth_session_secret: str = ""
+    auth_session_hours: int = 168
+    auth_cookie_secure: bool = True
+
     # Bark iOS 推送（market-watcher 触发告警时发送）
     # device_key = Bark app 首页 URL 里 api.day.app/ 后面那段（22 字符）
     bark_device_key: str = ""

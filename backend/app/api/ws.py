@@ -12,6 +12,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.config import settings
 from app.services.quote import get_realtime_quotes
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,12 @@ MAX_SYMBOLS_PER_CONNECTION = 50
 
 @router.websocket("/ws/quotes")
 async def quotes_websocket(websocket: WebSocket) -> None:
+    if settings.require_auth:
+        from app.services.auth import COOKIE_NAME, verify_session
+
+        if not verify_session(websocket.cookies.get(COOKIE_NAME)):
+            await websocket.close(code=4401)
+            return
     await websocket.accept()
     symbols: list[str] = []
 

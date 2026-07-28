@@ -1,8 +1,9 @@
-from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.db import init_db
@@ -43,6 +44,28 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="AI Trading", version="0.1.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def require_dashboard_session(request: Request, call_next):
+    if settings.require_auth and request.url.path.startswith("/api"):
+        public_paths = {"/api/health", "/api/auth/login"}
+        if request.url.path not in public_paths:
+            from app.services.auth import COOKIE_NAME, verify_session
+
+            if not verify_session(request.cookies.get(COOKIE_NAME)):
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "data": None,
+                        "error": {
+                            "code": "UNAUTHORIZED",
+                            "message": "请先登录",
+                            "retryable": False,
+                        },
+                    },
+                )
+    return await call_next(request)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -52,9 +75,27 @@ app.add_middleware(
 )
 
 # 注册路由
-from app.api import account, alerts, briefing, chat, decisions, events, health, options, position_analysis, quotes, suggestions, sync, system, trades, ws  # noqa: E402
+from app.api import (  # noqa: E402
+    account,
+    alerts,
+    auth,
+    briefing,
+    chat,
+    decisions,
+    events,
+    health,
+    options,
+    position_analysis,
+    quotes,
+    suggestions,
+    sync,
+    system,
+    trades,
+    ws,
+)
 
 app.include_router(health.router, prefix="/api", tags=["health"])
+app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(account.router, prefix="/api", tags=["account"])
 app.include_router(trades.router, prefix="/api", tags=["trades"])
 app.include_router(quotes.router, prefix="/api", tags=["quotes"])
