@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+from contextvars import copy_context
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -25,12 +26,16 @@ MAX_SYMBOLS_PER_CONNECTION = 50
 
 @router.websocket("/ws/quotes")
 async def quotes_websocket(websocket: WebSocket) -> None:
+    tenant_token = None
     if settings.require_auth:
-        from app.services.auth import COOKIE_NAME, verify_session
+        from app.db import set_current_username
+        from app.services.auth import COOKIE_NAME, session_username
 
-        if not verify_session(websocket.cookies.get(COOKIE_NAME)):
+        username = session_username(websocket.cookies.get(COOKIE_NAME))
+        if not username:
             await websocket.close(code=4401)
             return
+        tenant_token = set_current_username(username)
     await websocket.accept()
     symbols: list[str] = []
 
@@ -67,12 +72,18 @@ async def quotes_websocket(websocket: WebSocket) -> None:
             await websocket.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
+    finally:
+        if tenant_token is not None:
+            from app.db import reset_current_username
+
+            reset_current_username(tenant_token)
 
 
 async def _push_quotes(websocket: WebSocket, symbols: list[str]) -> None:
     """在线程池中调用同步报价函数，推送结果给客户端"""
     loop = asyncio.get_event_loop()
-    quotes = await loop.run_in_executor(None, get_realtime_quotes, symbols)
+    context = copy_context()
+    quotes = await loop.run_in_executor(None, context.run, get_realtime_quotes, symbols)
     await websocket.send_json({
         "type": "quotes",
         "data": [q.model_dump() for q in quotes],

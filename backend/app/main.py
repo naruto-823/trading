@@ -47,12 +47,15 @@ app = FastAPI(title="AI Trading", version="0.1.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def require_dashboard_session(request: Request, call_next):
+    tenant_token = None
     if settings.require_auth and request.url.path.startswith("/api"):
         public_paths = {"/api/health", "/api/auth/login", "/api/auth/register"}
         if request.url.path not in public_paths:
-            from app.services.auth import COOKIE_NAME, verify_session
+            from app.db import set_current_username
+            from app.services.auth import COOKIE_NAME, session_username
 
-            if not verify_session(request.cookies.get(COOKIE_NAME)):
+            username = session_username(request.cookies.get(COOKIE_NAME))
+            if not username:
                 return JSONResponse(
                     status_code=401,
                     content={
@@ -64,7 +67,14 @@ async def require_dashboard_session(request: Request, call_next):
                         },
                     },
                 )
-    return await call_next(request)
+            tenant_token = set_current_username(username)
+    try:
+        return await call_next(request)
+    finally:
+        if tenant_token is not None:
+            from app.db import reset_current_username
+
+            reset_current_username(tenant_token)
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,6 +90,7 @@ from app.api import (  # noqa: E402
     alerts,
     auth,
     briefing,
+    broker,
     chat,
     decisions,
     events,
@@ -96,6 +107,7 @@ from app.api import (  # noqa: E402
 
 app.include_router(health.router, prefix="/api", tags=["health"])
 app.include_router(auth.router, prefix="/api", tags=["auth"])
+app.include_router(broker.router, prefix="/api", tags=["broker"])
 app.include_router(account.router, prefix="/api", tags=["account"])
 app.include_router(trades.router, prefix="/api", tags=["trades"])
 app.include_router(quotes.router, prefix="/api", tags=["quotes"])
