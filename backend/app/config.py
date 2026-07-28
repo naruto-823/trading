@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # Production application login. Local development stays open by default.
     require_auth: bool = False
     auth_username: str = ""
+    legacy_auth_username: str = ""
     auth_password: str = ""
     auth_session_secret: str = ""
     auth_session_hours: int = 168
