@@ -1,18 +1,9 @@
-FROM node:22-alpine AS build
-
-WORKDIR /src
-RUN corepack enable && corepack prepare pnpm@11.15.1 --activate
-
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/.pnpmrc.json ./
-RUN pnpm install --frozen-lockfile
-
-COPY frontend/ ./
-RUN pnpm build
-
 FROM caddy:2.10-alpine
 
 COPY Caddyfile /etc/caddy/Caddyfile
-COPY --from=build /src/dist /srv
+# The deployment workflow builds the frontend during project checks. Copying the
+# verified artifact keeps production VPS builds tiny and avoids a second Vite build.
+COPY frontend/dist /srv
 
 EXPOSE 80 443
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \
