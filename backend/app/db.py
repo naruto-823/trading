@@ -94,6 +94,40 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _apply_lightweight_migrations()
+    _bootstrap_legacy_user()
+
+
+def _bootstrap_legacy_user() -> None:
+    if not settings.require_auth or not settings.auth_username or not settings.auth_password:
+        return
+    from sqlalchemy import select
+
+    from app.models.user import User
+    from app.services.auth import hash_password
+    from app.services.broker_credentials import extract_broker_account_id
+
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.username == settings.auth_username))
+        if user is None:
+            salt, password_hash = hash_password(settings.auth_password)
+            user = User(
+                username=settings.auth_username,
+                password_salt=salt,
+                password_hash=password_hash,
+            )
+            db.add(user)
+        if settings.validate_longport():
+            account_id = extract_broker_account_id(settings.longport_access_token)
+            owner = db.scalar(
+                select(User).where(
+                    User.broker_account_id == account_id,
+                    User.username != settings.auth_username,
+                )
+            )
+            if owner is not None:
+                raise RuntimeError("Legacy Longbridge account is already bound to another system user")
+            user.broker_account_id = account_id
+        db.commit()
 
 
 def _apply_lightweight_migrations() -> None:
@@ -126,6 +160,7 @@ def _apply_lightweight_migrations() -> None:
         ("app_user", "broker_app_key_encrypted", "TEXT"),
         ("app_user", "broker_app_secret_encrypted", "TEXT"),
         ("app_user", "broker_access_token_encrypted", "TEXT"),
+        ("app_user", "broker_account_id", "VARCHAR(64)"),
     ]
     for table, column, ddl in added:
         if table not in insp.get_table_names():
@@ -135,3 +170,11 @@ def _apply_lightweight_migrations() -> None:
             continue
         with engine.begin() as conn:
             conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}'))
+    if "app_user" in inspect(engine).get_table_names():
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_app_user_broker_account_id "
+                    "ON app_user(broker_account_id) WHERE broker_account_id IS NOT NULL"
+                )
+            )
