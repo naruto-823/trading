@@ -44,6 +44,13 @@ def test_two_authenticated_users_cannot_see_each_others_records(monkeypatch, db_
     monkeypatch.setattr(settings, "auth_session_secret", "s" * 64)
     monkeypatch.setattr(settings, "auth_cookie_secure", False)
     monkeypatch.setattr(settings, "broker_credentials_key", "k" * 64)
+    monkeypatch.setattr(settings, "longport_app_key", "")
+    monkeypatch.setattr(settings, "longport_app_secret", "")
+    monkeypatch.setattr(settings, "longport_access_token", "")
+    monkeypatch.setattr(
+        "app.services.broker_credentials.validate_broker_credentials",
+        lambda *_args: "AAID-FIRST-USER",
+    )
 
     def override_auth_db():
         yield db_session
@@ -80,5 +87,14 @@ def test_two_authenticated_users_cannot_see_each_others_records(monkeypatch, db_
             assert saved.status_code == 200
             assert first_client.get("/api/broker/credentials").json()["data"]["configured"] is True
             assert second_client.get("/api/broker/credentials").json()["data"]["configured"] is False
+            duplicate = second_client.put(
+                "/api/broker/credentials",
+                json={
+                    "app_key": "second-user-app-key",
+                    "app_secret": "second-user-app-secret-value",
+                    "access_token": "second-user-access-token-value-1234567890",
+                },
+            )
+            assert duplicate.status_code == 409
     finally:
         app.dependency_overrides.clear()

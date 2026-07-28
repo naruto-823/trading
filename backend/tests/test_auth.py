@@ -14,6 +14,9 @@ def _configure(monkeypatch):
     monkeypatch.setattr(settings, "auth_password", "correct horse")
     monkeypatch.setattr(settings, "auth_session_secret", "s" * 64)
     monkeypatch.setattr(settings, "auth_session_hours", 1)
+    monkeypatch.setattr(settings, "longport_app_key", "")
+    monkeypatch.setattr(settings, "longport_app_secret", "")
+    monkeypatch.setattr(settings, "longport_access_token", "")
 
 
 def test_authenticate_and_signed_session(monkeypatch):

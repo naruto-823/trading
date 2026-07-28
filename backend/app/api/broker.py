@@ -4,7 +4,11 @@ from sqlalchemy.orm import Session
 
 from app.db import current_username, get_auth_db
 from app.longbridge.client import reset_user_contexts
-from app.services.broker_credentials import broker_credentials_configured, save_broker_credentials
+from app.services.broker_credentials import (
+    BrokerAccountAlreadyBoundError,
+    broker_credentials_configured,
+    save_broker_credentials,
+)
 
 router = APIRouter()
 
@@ -29,8 +33,10 @@ def update_credentials(body: BrokerCredentialsBody, db: Session = Depends(get_au
     if not username:
         raise HTTPException(status_code=401, detail="请先登录")
     try:
-        save_broker_credentials(username, body.app_key, body.app_secret, body.access_token, db)
+        account_id = save_broker_credentials(username, body.app_key, body.app_secret, body.access_token, db)
         reset_user_contexts(username)
+    except BrokerAccountAlreadyBoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"data": {"configured": True}, "error": None}
+    return {"data": {"configured": True, "account_id": account_id}, "error": None}
