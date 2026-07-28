@@ -48,7 +48,7 @@ app = FastAPI(title="AI Trading", version="0.1.0", lifespan=lifespan)
 @app.middleware("http")
 async def require_dashboard_session(request: Request, call_next):
     if settings.require_auth and request.url.path.startswith("/api"):
-        public_paths = {"/api/health", "/api/auth/login"}
+        public_paths = {"/api/health", "/api/auth/login", "/api/auth/register"}
         if request.url.path not in public_paths:
             from app.services.auth import COOKIE_NAME, verify_session
 

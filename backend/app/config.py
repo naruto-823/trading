@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     require_auth: bool = False
     auth_username: str = ""
     auth_password: str = ""
+    auth_registration_code: str = ""
     auth_session_secret: str = ""
     auth_session_hours: int = 168
     auth_cookie_secure: bool = True
