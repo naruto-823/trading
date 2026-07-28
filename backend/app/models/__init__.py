@@ -9,8 +9,9 @@ from app.models.position import Position
 from app.models.position_analysis_report import PositionAnalysisReport
 from app.models.suggestion import Suggestion
 from app.models.sync_log import SyncLog
+from app.models.user import User
 
 __all__ = [
     "AccountSnapshot", "Alert", "DailyBaseline", "Decision", "EventNotification",
-    "Execution", "Order", "Position", "PositionAnalysisReport", "Suggestion", "SyncLog",
+    "Execution", "Order", "Position", "PositionAnalysisReport", "Suggestion", "SyncLog", "User",
 ]

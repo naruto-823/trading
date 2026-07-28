@@ -107,8 +107,10 @@ export default function App() {
 }
 
 function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [invitationCode, setInvitationCode] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -117,13 +119,18 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
     setSubmitting(true);
     setError("");
     try {
-      const response = await fetch("/api/auth/login", {
+      const response = await fetch(`/api/auth/${mode === "login" ? "login" : "register"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify(
+          mode === "login"
+            ? { username, password }
+            : { username, password, invitation_code: invitationCode },
+        ),
       });
       if (!response.ok) {
-        setError("用户名或密码不正确");
+        const result = await response.json().catch(() => null);
+        setError(result?.detail ?? (mode === "login" ? "用户名或密码不正确" : "注册失败，请检查填写内容"));
         return;
       }
       onSuccess();
@@ -145,7 +152,27 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             <ShieldCheck className="h-5 w-5 text-blue-300" />
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">AI Trading</h1>
-          <p className="mt-2 text-sm leading-6 text-slate-400">登录你的私人交易工作台</p>
+          <p className="mt-2 text-sm leading-6 text-slate-400">
+            {mode === "login" ? "登录你的私人交易工作台" : "使用邀请码创建访问账号"}
+          </p>
+        </div>
+
+        <div className="mb-5 grid grid-cols-2 rounded-lg bg-black/20 p-1 text-sm">
+          {(["login", "register"] as const).map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => {
+                setMode(item);
+                setError("");
+              }}
+              className={`rounded-md py-2 transition ${
+                mode === item ? "bg-white/10 text-white shadow-sm" : "text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              {item === "login" ? "登录" : "注册"}
+            </button>
+          ))}
         </div>
 
         <form onSubmit={submit} className="space-y-4">
@@ -161,6 +188,21 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
               required
             />
           </label>
+
+          {mode === "register" && (
+            <label className="block">
+              <span className="mb-2 block text-xs font-medium text-slate-300">邀请码</span>
+              <input
+                type="password"
+                autoComplete="off"
+                value={invitationCode}
+                onChange={(event) => setInvitationCode(event.target.value)}
+                className="h-11 w-full rounded-lg border border-white/10 bg-black/20 px-3 text-sm outline-none transition placeholder:text-slate-600 focus:border-blue-400/60 focus:ring-2 focus:ring-blue-500/15"
+                placeholder="输入管理员提供的邀请码"
+                required
+              />
+            </label>
+          )}
           <label className="block">
             <span className="mb-2 block text-xs font-medium text-slate-300">密码</span>
             <input
@@ -181,7 +223,13 @@ function LoginPage({ onSuccess }: { onSuccess: () => void }) {
             disabled={submitting}
             className="mt-2 flex h-11 w-full items-center justify-center rounded-lg bg-blue-500 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {submitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : "进入工作台"}
+            {submitting ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : mode === "login" ? (
+              "进入工作台"
+            ) : (
+              "创建账号并进入"
+            )}
           </button>
         </form>
 
