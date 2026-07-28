@@ -29,10 +29,10 @@ class Settings(BaseSettings):
     require_auth: bool = False
     auth_username: str = ""
     auth_password: str = ""
-    auth_registration_code: str = ""
     auth_session_secret: str = ""
     auth_session_hours: int = 168
     auth_cookie_secure: bool = True
+    broker_credentials_key: str = ""
 
     # Bark iOS 推送（market-watcher 触发告警时发送）
     # device_key = Bark app 首页 URL 里 api.day.app/ 后面那段（22 字符）

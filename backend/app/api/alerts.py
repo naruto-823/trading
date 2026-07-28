@@ -34,16 +34,11 @@ def patch_alert(alert_id: str, payload: AlertUpdate, db: Session = Depends(get_d
 
 
 @router.delete("/alerts/{alert_id}")
-def remove_alert(alert_id: str):
-    from app.db import SessionLocal
-    db = SessionLocal()
-    try:
-        ok = delete_alert(db, alert_id)
-        if not ok:
-            raise HTTPException(status_code=404, detail="alert not found")
-        return {"data": {"id": alert_id, "deleted": True}, "error": None}
-    finally:
-        db.close()
+def remove_alert(alert_id: str, db: Session = Depends(get_db)):
+    ok = delete_alert(db, alert_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="alert not found")
+    return {"data": {"id": alert_id, "deleted": True}, "error": None}
 
 
 @router.get("/alerts/notify/status")

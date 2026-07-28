@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import get_db
+from app.db import get_auth_db
 from app.main import app
 from app.services.auth import authenticate, create_session, verify_session
 
@@ -59,22 +59,18 @@ def test_api_login_session_and_logout(monkeypatch):
         assert client.get("/api/auth/session").status_code == 401
 
 
-def test_invitation_registration_and_login(monkeypatch, db_session: Session):
+def test_registration_and_login(monkeypatch, db_session: Session):
     _configure(monkeypatch)
     monkeypatch.setattr(settings, "require_auth", True)
     monkeypatch.setattr(settings, "auth_cookie_secure", False)
-    monkeypatch.setattr(settings, "auth_registration_code", "invite-only")
 
     def override_get_db():
         yield db_session
 
-    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_auth_db] = override_get_db
     try:
         with TestClient(app) as client:
-            body = {"username": "new_user", "password": "strong-pass-123", "invitation_code": "wrong"}
-            assert client.post("/api/auth/register", json=body).status_code == 403
-
-            body["invitation_code"] = "invite-only"
+            body = {"username": "new_user", "password": "strong-pass-123"}
             assert client.post("/api/auth/register", json=body).status_code == 201
             assert client.get("/api/auth/session").json()["data"]["username"] == "new_user"
             assert client.post("/api/auth/register", json=body).status_code == 409
