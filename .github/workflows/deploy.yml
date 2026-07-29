@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   deploy:
     uses: naruto-823/docker-vps-deploy-template/.github/workflows/reusable-deploy.yml@v1
