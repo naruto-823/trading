@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: naruto-823/docker-vps-deploy-template/.github/workflows/reusable-deploy.yml@v1
+    uses: naruto-823/docker-vps-deploy-template/.github/workflows/reusable-deploy.yml@4e54fb2cd3c4e9e7aa2848255831eb0173a96ad0
     with:
       app_name: trading
       compose_file: compose.production.yml
