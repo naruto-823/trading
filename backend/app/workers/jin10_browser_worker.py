@@ -156,7 +156,7 @@ def _process_flash_sync(flash: dict[str, Any]) -> None:
             return
 
         # Quick Assess：多维度评分
-        scoring = score_relevance(content)
+        scoring = score_relevance(content, allow_ai=settings.automatic_ai_enabled)
         score = scoring["score"]
         affected = scoring["affected_tickers"]
         affected_json = json.dumps(affected, ensure_ascii=False) if affected else None

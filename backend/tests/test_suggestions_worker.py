@@ -3,12 +3,14 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from app.workers import suggestions_worker
 
 
-def test_register_adds_job():
+def test_register_adds_paused_manual_job(monkeypatch):
+    monkeypatch.setattr(suggestions_worker.settings, "automatic_ai_enabled", False)
     sched = AsyncIOScheduler()
     suggestions_worker.register(sched)
     job = sched.get_job("suggestions-refresh")
     assert job is not None
     assert job.name
+    assert job.next_run_time is None
 
 
 async def test_run_suggestions_job_swallows_success(monkeypatch):

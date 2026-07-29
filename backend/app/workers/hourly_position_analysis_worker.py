@@ -48,10 +48,7 @@ async def run_hourly_analysis_job() -> None:
 
 
 def register(sched: BaseScheduler) -> None:
-    """每整点(minute=0)跑一次。enabled=False 时不挂 job。"""
-    if not settings.hourly_analysis_enabled:
-        logger.info("hourly-position-analysis 已禁用 (HOURLY_ANALYSIS_ENABLED=false),跳过注册")
-        return
+    """注册体检任务；自动 AI 关闭时保持暂停，供用户手动触发。"""
     sched.add_job(
         run_hourly_analysis_job,
         trigger=CronTrigger(minute=0, timezone="UTC"),
@@ -62,3 +59,5 @@ def register(sched: BaseScheduler) -> None:
         coalesce=True,
         misfire_grace_time=300,
     )
+    if not settings.automatic_ai_enabled or not settings.hourly_analysis_enabled:
+        sched.pause_job(JOB_ID)

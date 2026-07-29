@@ -9,9 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -212,7 +210,8 @@ SYSTEM_PROMPT = """你是用户的个人投资顾问。用户在每次打开仪�
 时段判断（重要）：
 - 现货指数（标普500/纳指综合）只在常规交易时段更新，夜盘/周末显示的是上一交易日收盘数
 - 期货（标普期货/纳指期货）24h 跑，反映 overnight 真实情绪
-- 如果现货和期货明显分歧（如现货收平但期货跌 0.5%+），优先以期货为准描述"夜盘 / 盘前"的实时情绪，并明说"现货是 X 日收盘，期货反映夜盘 -X%"
+- 如果现货和期货明显分歧（如现货收平但期货跌 0.5%+），优先以期货为准描述"夜盘 / 盘前"的实时情绪，
+  并明说"现货是 X 日收盘，期货反映夜盘 -X%"
 - 美东时间 16:00-09:30 ET（北京次日 04:00-21:30）属于夜盘/盘前时段，此时市场叙事看期货
 
 规则：
@@ -249,6 +248,15 @@ def build_briefing(db: Session, force_refresh: bool = False) -> dict:
                     "cache_hit": True,
                     "generated_at": datetime.fromtimestamp(ts, timezone.utc).isoformat(),
                 }
+        if not settings.automatic_ai_enabled:
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "cache_hit": False,
+                "market_summary": "自动 AI 已关闭，点击右上角刷新按钮手动生成复盘。",
+                "stocks": [],
+                "overall_action": "",
+                "context": {},
+            }
 
     # 抓新闻 + 大盘背景（follow_redirects 处理 Google News 的 302）
     with httpx.Client(timeout=10.0, headers=HTTP_HEADERS, follow_redirects=True) as client:

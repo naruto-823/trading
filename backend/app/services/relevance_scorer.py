@@ -126,7 +126,7 @@ def _fail_open(reason: str) -> dict[str, Any]:
     }
 
 
-def score_relevance(content: str) -> dict[str, Any]:
+def score_relevance(content: str, *, allow_ai: bool = True) -> dict[str, Any]:
     """评分一条快讯。永远返回字典，永不抛异常（fail-open）。
 
     返回结构：
@@ -143,6 +143,9 @@ def score_relevance(content: str) -> dict[str, Any]:
     """
     if not content or len(content.strip()) < 5:
         return {**_fail_open("内容太短"), "score": 0, "relevance": "noise", "model": "rule"}
+
+    if not allow_ai:
+        return _fail_open("自动 AI 已关闭，规则直通")
 
     if settings.relevance_threshold <= 0:
         return _fail_open("scorer 已禁用")
