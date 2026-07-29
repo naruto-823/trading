@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from fastapi.concurrency import run_in_threadpool
 
+from app.config import settings
 from app.db import SessionLocal
 from app.services.suggestions import build_suggestions
 from app.workers.scheduler import record_duration
@@ -56,3 +57,5 @@ def register(sched: AsyncIOScheduler) -> None:
         coalesce=True,
         misfire_grace_time=600,
     )
+    if not settings.automatic_ai_enabled:
+        sched.pause_job(JOB_ID)

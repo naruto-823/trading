@@ -107,7 +107,7 @@ def run_macro_flash(db: Session) -> dict[str, int]:
 
         # Quick Assess：LLM 多维度评分
         score_text = item.content or item.title
-        scoring = score_relevance(score_text)
+        scoring = score_relevance(score_text, allow_ai=settings.automatic_ai_enabled)
         score = scoring["score"]
         affected = scoring["affected_tickers"]
         affected_json = _json.dumps(affected, ensure_ascii=False) if affected else None
