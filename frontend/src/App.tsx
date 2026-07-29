@@ -9,6 +9,7 @@ import {
   Bell,
   LogOut,
   ShieldCheck,
+  ShieldAlert,
   LoaderCircle,
 } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
@@ -17,6 +18,7 @@ import PnL from "./pages/PnL";
 import Chat from "./pages/Chat";
 import Decisions from "./pages/Decisions";
 import Alerts from "./pages/Alerts";
+import RiskRadar from "./pages/RiskRadar";
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -24,6 +26,7 @@ const navItems = [
   { to: "/pnl", label: "盈亏分析", icon: TrendingUp },
   { to: "/decisions", label: "决策日志", icon: ClipboardCheck },
   { to: "/alerts", label: "价格告警", icon: Bell },
+  { to: "/risk", label: "风险雷达", icon: ShieldAlert },
   { to: "/chat", label: "AI 助手", icon: MessageSquare },
 ];
 
@@ -115,6 +118,7 @@ export default function App() {
           <Route path="/pnl" element={<PnL />} />
           <Route path="/decisions" element={<Decisions />} />
           <Route path="/alerts" element={<Alerts />} />
+          <Route path="/risk" element={<RiskRadar />} />
           <Route path="/chat" element={<Chat />} />
         </Routes>
       </main>

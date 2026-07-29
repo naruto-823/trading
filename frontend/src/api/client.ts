@@ -242,6 +242,19 @@ export async function getBriefing(forceRefresh = false) {
   return request<BriefingData>(`/dashboard/briefing${qs}`);
 }
 
+export interface RiskRadarData {
+  as_of: string | null;
+  currency: string;
+  summary: Array<{ level: "normal" | "medium" | "high"; title: string; detail: string }>;
+  concentration: Array<{ symbol: string; market_value_hkd: number; weight_pct: number; risk_level: "normal" | "medium" | "high" }>;
+  options: Array<{ symbol: string; underlying: string; expiry: string; days_to_expiry: number; kind: "call" | "put"; strike: number; quantity: number; covered: boolean; market_value_hkd: number; risk_flags: string[] }>;
+  stress: { shock_pct: number; estimated_stock_pnl_hkd: number; estimated_net_assets_hkd: number; excluded: string } | null;
+}
+
+export async function getRiskRadar(shockPct = 10) {
+  return request<RiskRadarData>(`/risk/radar?shock_pct=${shockPct}`);
+}
+
 export type SuggestionAction = "stop_loss" | "sell" | "buy" | "add";
 export type SuggestionUrgency = "high" | "medium" | "low";
 

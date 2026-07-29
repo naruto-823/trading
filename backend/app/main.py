@@ -98,6 +98,7 @@ from app.api import (  # noqa: E402
     options,
     position_analysis,
     quotes,
+    risk,
     suggestions,
     sync,
     system,
@@ -111,6 +112,7 @@ app.include_router(broker.router, prefix="/api", tags=["broker"])
 app.include_router(account.router, prefix="/api", tags=["account"])
 app.include_router(trades.router, prefix="/api", tags=["trades"])
 app.include_router(quotes.router, prefix="/api", tags=["quotes"])
+app.include_router(risk.router, prefix="/api", tags=["risk"])
 app.include_router(options.router, prefix="/api", tags=["options"])
 app.include_router(sync.router, prefix="/api", tags=["sync"])
 app.include_router(chat.router, prefix="/api", tags=["chat"])
