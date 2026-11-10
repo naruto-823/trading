@@ -54,7 +54,7 @@ jobs:
             set -euo pipefail
             printf 'Current release: '
             readlink "$HOME/apps/trading/current" || true
-            docker ps -a --filter label=com.docker.compose.project=trading --format '{{.Service}} {{.State}}' 2>/dev/null || docker ps -a --filter label=com.docker.compose.project=trading --format '{{.Names}} {{.State}}'
+            docker ps -a --filter label=com.docker.compose.project=trading --format '{{.Names}} {{.State}}'
             container=$(docker ps --filter label=com.docker.compose.project=trading --filter label=com.docker.compose.service=api --format '{{.ID}}' | head -n 1)
             test -n "$container"
             docker exec "$container" /app/.venv/bin/python -c 'import json; from app.config import settings; print(json.dumps({"bark_configured":bool(settings.bark_device_key),"broker_configured":settings.validate_longport(),"automatic_ai_enabled":settings.automatic_ai_enabled,"require_auth":settings.require_auth}))'

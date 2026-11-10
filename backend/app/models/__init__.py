@@ -4,6 +4,7 @@ from app.models.daily_baseline import DailyBaseline
 from app.models.decision import Decision
 from app.models.event_notification import EventNotification
 from app.models.execution import Execution
+from app.models.monitor_state import MonitorState
 from app.models.order import Order
 from app.models.position import Position
 from app.models.position_analysis_report import PositionAnalysisReport
@@ -13,5 +14,5 @@ from app.models.user import User
 
 __all__ = [
     "AccountSnapshot", "Alert", "DailyBaseline", "Decision", "EventNotification",
-    "Execution", "Order", "Position", "PositionAnalysisReport", "Suggestion", "SyncLog", "User",
+    "Execution", "Order", "Position", "PositionAnalysisReport", "Suggestion", "SyncLog", "User", "MonitorState",
 ]
