@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy release or inspect the existing server without changing it
+        type: choice
+        options: [deploy, inspect]
+        default: deploy
 
 permissions:
   contents: read
@@ -11,6 +17,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.event_name != 'workflow_dispatch' || inputs.operation == 'deploy'
     uses: naruto-823/docker-vps-deploy-template/.github/workflows/reusable-deploy.yml@v1.0.0
     with:
       app_name: trading
@@ -22,3 +29,34 @@ jobs:
         cd ../frontend && corepack enable && corepack prepare pnpm@11.15.1 --activate &&
         pnpm install --frozen-lockfile && pnpm build
     secrets: inherit
+
+  inspect:
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'inspect'
+    runs-on: ubuntu-latest
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          test -n "$KNOWN_HOSTS"
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Inspect health and configuration flags only
+        run: |
+          ssh -o ConnectTimeout=15 -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -se' <<'REMOTE'
+            set -euo pipefail
+            printf 'Current release: '
+            readlink "$HOME/apps/trading/current" || true
+            docker ps -a --filter label=com.docker.compose.project=trading --format '{{.Service}} {{.State}}' 2>/dev/null || docker ps -a --filter label=com.docker.compose.project=trading --format '{{.Names}} {{.State}}'
+            container=$(docker ps --filter label=com.docker.compose.project=trading --filter label=com.docker.compose.service=api --format '{{.ID}}' | head -n 1)
+            test -n "$container"
+            docker exec "$container" /app/.venv/bin/python -c 'import json; from app.config import settings; print(json.dumps({"bark_configured":bool(settings.bark_device_key),"broker_configured":settings.validate_longport(),"automatic_ai_enabled":settings.automatic_ai_enabled,"require_auth":settings.require_auth}))'
+            docker exec "$container" /app/.venv/bin/python -c 'import urllib.request; print("api_health",urllib.request.urlopen("http://127.0.0.1:8000/api/health",timeout=10).status)'
+          REMOTE
