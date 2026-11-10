@@ -1,0 +1,57 @@
+name: Portfolio monitor watchdog
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-monitor-watchdog
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    # Activate only after the host identity and Bark configuration are verified.
+    if: vars.RISK_MONITOR_WATCHDOG_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure pinned SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          test -n "$KNOWN_HOSTS"
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - uses: actions/cache/restore@v4
+        with:
+          path: backend/.watchdog
+          key: portfolio-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: portfolio-watchdog-
+      - run: python -m pip install httpx python-dotenv
+      - name: Probe monitor and notify only on changes
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          APP_ENV: ${{ secrets.APP_ENV }}
+          BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+          BARK_BASE_URL: ${{ secrets.BARK_BASE_URL }}
+        run: python scripts/risk_watchdog.py
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: backend/.watchdog
+          key: portfolio-watchdog-${{ github.run_id }}-${{ github.run_attempt }}

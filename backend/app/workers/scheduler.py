@@ -75,6 +75,7 @@ def start_scheduler() -> None:
     from app.workers.market_watcher_worker import register as register_market_watcher
     from app.workers.overnight_quote_worker import register as register_overnight_quote
     from app.workers.refresh_worker import register as register_refresh
+    from app.workers.risk_monitor_worker import register as register_risk_monitor
     from app.workers.suggestions_worker import register as register_suggestions
     from app.workers.hourly_position_analysis_worker import register as register_hourly_analysis
 
@@ -88,6 +89,7 @@ def start_scheduler() -> None:
     register_daily_baseline(sched)
     register_suggestions(sched)
     register_hourly_analysis(sched)
+    register_risk_monitor(sched)
 
     sched.start()
     logger.info("Scheduler started with %d jobs: %s",

@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # device_key = Bark app 首页 URL 里 api.day.app/ 后面那段（22 字符）
     bark_device_key: str = ""
     bark_base_url: str = "https://api.day.app"
+    risk_monitor_enabled: bool = False
+    risk_monitor_usd_hkd: float = 7.85
 
     # 新闻源 fallback 链：Finnhub → Tavily → Brave → Google News RSS
     # 没配 key 的 tier 自动跳过；Google News RSS 永远可用兜底

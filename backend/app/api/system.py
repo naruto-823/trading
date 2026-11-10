@@ -1,11 +1,25 @@
+import time
+
 from fastapi import APIRouter, HTTPException
 
+from app.config import settings
+from app.db import SessionLocal, current_username
 from app.services.macro_feed import available_macro_sources
 from app.services.news_sources import available_sources
+from app.services.risk_monitor import health
 from app.workers import jin10_browser_worker
 from app.workers.scheduler import list_jobs, trigger_job_now
 
 router = APIRouter()
+
+
+@router.get("/system/risk-monitor")
+def get_risk_monitor():
+    username = current_username()
+    if username and username != settings.auth_username:
+        raise HTTPException(status_code=403, detail="Default-account monitor is owner only")
+    with SessionLocal() as db:
+        return {"data": health(db, time.time()), "error": None}
 
 
 @router.get("/system/jobs")
@@ -61,6 +75,7 @@ def get_realtime_status():
 def get_longbridge_packages():
     """LB 行情包到期状态（提前续费提醒用）"""
     from datetime import datetime, timezone
+
     from app.config import settings
     from app.longbridge.client import get_quote_context
 

@@ -6,6 +6,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: sqlite:////app/data/trading.db
+      RISK_MONITOR_ENABLED: "${RISK_MONITOR_ENABLED:-false}"
     expose:
       - "8000"
     volumes:
